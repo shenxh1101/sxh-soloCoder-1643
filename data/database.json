@@ -1,0 +1,94 @@
+{
+  "users": [
+    {
+      "id": "admin-001",
+      "username": "admin",
+      "name": "系统管理员",
+      "role": "admin"
+    },
+    {
+      "id": "recep-001",
+      "username": "reception",
+      "name": "前台接待员",
+      "role": "receptionist"
+    }
+  ],
+  "events": [
+    {
+      "id": "event-001",
+      "name": "2026科技创新峰会",
+      "startTime": "2026-06-20T23:14:47.209Z",
+      "endTime": "2026-06-21T23:14:47.209Z",
+      "location": "上海国际会议中心",
+      "expectedAttendees": 200,
+      "description": "汇聚行业精英，探讨科技创新前沿趋势",
+      "status": "upcoming",
+      "creatorId": "admin-001",
+      "createdAt": "2026-06-19T23:14:47.209Z",
+      "updatedAt": "2026-06-19T23:14:47.209Z"
+    }
+  ],
+  "guests": [
+    {
+      "eventId": "event-001",
+      "name": "张三",
+      "company": "",
+      "position": "",
+      "phone": "",
+      "email": "",
+      "qrCode": "guest-event-001-1781911380386-2o3iy7",
+      "checkInStatus": "checked_in",
+      "forumIds": [],
+      "id": "guest-1781911380387-ksyjhe",
+      "createdAt": "2026-06-19T23:23:00.387Z",
+      "checkInTime": "2026-06-19T23:24:38.168Z"
+    }
+  ],
+  "checkIns": [
+    {
+      "guestId": "guest-1781911380387-ksyjhe",
+      "eventId": "event-001",
+      "checkInTime": "2026-06-19T23:24:38.168Z",
+      "method": "manual",
+      "id": "checkin-1781911478169-gt5iyn"
+    }
+  ],
+  "seatZones": [
+    {
+      "id": "zone-vip-001",
+      "eventId": "event-001",
+      "name": "VIP区",
+      "type": "vip",
+      "capacity": 30,
+      "color": "#d4af37"
+    },
+    {
+      "id": "zone-media-001",
+      "eventId": "event-001",
+      "name": "媒体区",
+      "type": "media",
+      "capacity": 50,
+      "color": "#3b82f6"
+    },
+    {
+      "id": "zone-general-001",
+      "eventId": "event-001",
+      "name": "普通区",
+      "type": "general",
+      "capacity": 120,
+      "color": "#6b7280"
+    }
+  ],
+  "forums": [
+    {
+      "eventId": "event-001",
+      "name": "人工智能分论坛",
+      "location": "",
+      "startTime": "",
+      "endTime": "",
+      "description": "",
+      "id": "forum-1781911515590-hdf3x2",
+      "guestIds": []
+    }
+  ]
+}
