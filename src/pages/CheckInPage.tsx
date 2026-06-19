@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import {
   QrCode,
@@ -8,9 +8,21 @@ import {
   Search,
   Clock,
   ScanLine,
+  Camera,
+  CameraOff,
+  AlertTriangle,
+  MapPin,
 } from 'lucide-react';
 import { checkInsApi, guestsApi, eventsApi } from '@/api';
 import type { Guest, Event } from '@shared/types';
+import { Html5Qrcode } from 'html5-qrcode';
+
+type ScanResult = {
+  success: boolean;
+  guest?: Guest;
+  message: string;
+  errorCode?: string;
+};
 
 export default function CheckInPage() {
   const { eventId } = useParams<{ eventId: string }>();
@@ -18,20 +30,23 @@ export default function CheckInPage() {
   const [qrInput, setQrInput] = useState('');
   const [searchName, setSearchName] = useState('');
   const [searchResults, setSearchResults] = useState<Guest[]>([]);
-  const [result, setResult] = useState<{
-    success: boolean;
-    guest?: Guest;
-    message: string;
-  } | null>(null);
+  const [result, setResult] = useState<ScanResult | null>(null);
   const [recentCheckIns, setRecentCheckIns] = useState<Guest[]>([]);
   const [isScanning, setIsScanning] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const scannerRef = useRef<Html5Qrcode | null>(null);
+  const scannerContainerId = 'qr-reader';
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isProcessingRef = useRef(false);
 
   useEffect(() => {
     if (eventId) {
       loadEvent();
     }
+    return () => {
+      stopScanner();
+    };
   }, [eventId]);
 
   const loadEvent = async () => {
@@ -47,10 +62,17 @@ export default function CheckInPage() {
   const handleQrSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!qrInput.trim() || !eventId) return;
+    await processQrCode(qrInput.trim());
+    setQrInput('');
+  };
+
+  const processQrCode = async (qrCode: string): Promise<void> => {
+    if (isProcessingRef.current || !eventId) return;
+    isProcessingRef.current = true;
 
     try {
       const response = await checkInsApi.checkIn(eventId, {
-        qrCode: qrInput.trim(),
+        qrCode,
         method: 'qrcode',
       });
       setResult({
@@ -58,16 +80,128 @@ export default function CheckInPage() {
         guest: response.guest,
         message: response.message,
       });
-      setRecentCheckIns((prev) => [response.guest, ...prev].slice(0, 5));
-      setQrInput('');
+      setRecentCheckIns((prev) => [response.guest, ...prev].slice(0, 10));
+      playBeep();
     } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : '签到失败';
+      let errorCode = 'unknown';
+      let guest: Guest | undefined;
+
+      const errorData = (err as any)?.data;
+      if (errorData) {
+        if (errorData.errorCode) {
+          errorCode = errorData.errorCode;
+        }
+        if (errorData.guest) {
+          guest = errorData.guest;
+        }
+      }
+
       setResult({
         success: false,
-        message: err instanceof Error ? err.message : '签到失败',
+        guest,
+        message: errorMessage,
+        errorCode,
       });
+      playErrorBeep();
+    } finally {
+      setTimeout(() => {
+        setResult(null);
+        isProcessingRef.current = false;
+      }, 3000);
     }
+  };
 
-    setTimeout(() => setResult(null), 3000);
+  const playBeep = () => {
+    try {
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+      oscillator.frequency.value = 800;
+      oscillator.type = 'sine';
+      gainNode.gain.value = 0.3;
+      oscillator.start();
+      setTimeout(() => {
+        oscillator.stop();
+        audioContext.close();
+      }, 150);
+    } catch {
+      // 忽略音频错误
+    }
+  };
+
+  const playErrorBeep = () => {
+    try {
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+      oscillator.frequency.value = 300;
+      oscillator.type = 'square';
+      gainNode.gain.value = 0.2;
+      oscillator.start();
+      setTimeout(() => {
+        oscillator.stop();
+        audioContext.close();
+      }, 200);
+    } catch {
+      // 忽略音频错误
+    }
+  };
+
+  const startScanner = async () => {
+    if (!eventId) return;
+    setCameraError(null);
+
+    try {
+      if (!scannerRef.current) {
+        scannerRef.current = new Html5Qrcode(scannerContainerId);
+      }
+
+      await scannerRef.current.start(
+        { facingMode: 'environment' },
+        {
+          fps: 10,
+          qrbox: { width: 250, height: 250 },
+        },
+        (decodedText) => {
+          processQrCode(decodedText);
+        },
+        () => {
+          // 扫描错误回调，忽略（持续扫描中）
+        },
+      );
+
+      setIsScanning(true);
+    } catch (err) {
+      console.error('启动摄像头失败:', err);
+      setCameraError(
+        '无法启动摄像头，请确保已授予摄像头权限，或使用 HTTPS 协议访问。' +
+          '您也可以手动输入二维码内容进行签到。',
+      );
+    }
+  };
+
+  const stopScanner = async () => {
+    if (scannerRef.current && scannerRef.current.isScanning) {
+      try {
+        await scannerRef.current.stop();
+      } catch (err) {
+        console.error('停止摄像头失败:', err);
+      }
+    }
+    setIsScanning(false);
+  };
+
+  const toggleScanner = () => {
+    if (isScanning) {
+      stopScanner();
+    } else {
+      startScanner();
+    }
   };
 
   const handleSearch = (value: string) => {
@@ -98,7 +232,7 @@ export default function CheckInPage() {
   };
 
   const handleManualCheckIn = async (guest: Guest) => {
-    if (!eventId) return;
+    if (!eventId || guest.checkInStatus === 'checked_in') return;
     try {
       const response = await checkInsApi.checkIn(eventId, {
         guestId: guest.id,
@@ -109,26 +243,67 @@ export default function CheckInPage() {
         guest: response.guest,
         message: '签到成功',
       });
-      setRecentCheckIns((prev) => [response.guest, ...prev].slice(0, 5));
+      setRecentCheckIns((prev) => [response.guest, ...prev].slice(0, 10));
       setSearchName('');
       setSearchResults([]);
       setShowSearch(false);
+      playBeep();
     } catch (err) {
       setResult({
         success: false,
         message: err instanceof Error ? err.message : '签到失败',
       });
+      playErrorBeep();
     }
 
     setTimeout(() => setResult(null), 3000);
   };
 
-  const handleCameraScan = () => {
-    setIsScanning(true);
-    setTimeout(() => {
-      setIsScanning(false);
-      alert('摄像头扫码功能需要HTTPS环境，当前可手动输入二维码内容进行签到');
-    }, 2000);
+  const getResultIcon = () => {
+    if (!result) return null;
+    if (result.success) {
+      return <CheckCircle className="w-10 h-10 text-green-500 flex-shrink-0" />;
+    }
+    switch (result.errorCode) {
+      case 'invalid_qrcode':
+        return <XCircle className="w-10 h-10 text-red-500 flex-shrink-0" />;
+      case 'already_checked_in':
+        return <AlertTriangle className="w-10 h-10 text-yellow-500 flex-shrink-0" />;
+      case 'wrong_event':
+        return <AlertTriangle className="w-10 h-10 text-orange-500 flex-shrink-0" />;
+      default:
+        return <XCircle className="w-10 h-10 text-red-500 flex-shrink-0" />;
+    }
+  };
+
+  const getResultStyle = () => {
+    if (!result) return '';
+    if (result.success) {
+      return 'bg-green-50 border-green-200';
+    }
+    switch (result.errorCode) {
+      case 'already_checked_in':
+        return 'bg-yellow-50 border-yellow-200';
+      case 'wrong_event':
+        return 'bg-orange-50 border-orange-200';
+      default:
+        return 'bg-red-50 border-red-200';
+    }
+  };
+
+  const getResultTitle = () => {
+    if (!result) return '';
+    if (result.success) return '签到成功';
+    switch (result.errorCode) {
+      case 'invalid_qrcode':
+        return '二维码无效';
+      case 'already_checked_in':
+        return '重复签到';
+      case 'wrong_event':
+        return '活动不匹配';
+      default:
+        return '签到失败';
+    }
   };
 
   return (
@@ -148,34 +323,57 @@ export default function CheckInPage() {
 
             <div className="p-6">
               <div
-                className={`relative w-full max-w-sm mx-auto aspect-square rounded-2xl border-2 border-dashed flex items-center justify-center transition-all ${
+                className={`relative w-full max-w-sm mx-auto aspect-square rounded-2xl border-2 overflow-hidden transition-all ${
                   isScanning
-                    ? 'border-primary-500 bg-primary-50'
-                    : 'border-gray-200 bg-gray-50 hover:border-primary-300 hover:bg-primary-50/50'
+                    ? 'border-primary-500 bg-black'
+                    : 'border-dashed border-gray-200 bg-gray-50 hover:border-primary-300 hover:bg-primary-50/50'
                 }`}
               >
                 {isScanning ? (
-                  <div className="text-center">
-                    <div className="relative w-48 h-48 mx-auto mb-4">
-                      <div className="absolute inset-0 border-2 border-primary-500 rounded-lg"></div>
-                      <div className="absolute left-0 right-0 h-1 bg-gradient-to-r from-transparent via-primary-500 to-transparent animate-scan-line"></div>
-                      <ScanLine className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-12 h-12 text-primary-500" />
+                  <div className="absolute inset-0">
+                    <div id={scannerContainerId} className="w-full h-full" />
+                    <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                      <div className="relative w-48 h-48">
+                        <div className="absolute inset-0 border-2 border-primary-400 rounded-lg animate-pulse"></div>
+                        <div className="absolute top-0 left-0 w-6 h-6 border-t-4 border-l-4 border-primary-500 rounded-tl-lg"></div>
+                        <div className="absolute top-0 right-0 w-6 h-6 border-t-4 border-r-4 border-primary-500 rounded-tr-lg"></div>
+                        <div className="absolute bottom-0 left-0 w-6 h-6 border-b-4 border-l-4 border-primary-500 rounded-bl-lg"></div>
+                        <div className="absolute bottom-0 right-0 w-6 h-6 border-b-4 border-r-4 border-primary-500 rounded-br-lg"></div>
+                      </div>
                     </div>
-                    <p className="text-primary-600 font-medium">正在扫描...</p>
                   </div>
                 ) : (
                   <button
-                    onClick={handleCameraScan}
-                    className="text-center group"
+                    onClick={toggleScanner}
+                    className="w-full h-full text-center group flex flex-col items-center justify-center"
                   >
                     <div className="w-24 h-24 mx-auto mb-4 rounded-2xl bg-white shadow-card flex items-center justify-center group-hover:shadow-card-hover transition-all">
-                      <QrCode className="w-12 h-12 text-primary-600" />
+                      <Camera className="w-12 h-12 text-primary-600" />
                     </div>
                     <p className="text-gray-600 font-medium">点击开启摄像头扫码</p>
                     <p className="text-sm text-gray-400 mt-1">或手动输入二维码内容</p>
                   </button>
                 )}
               </div>
+
+              {cameraError && (
+                <div className="mt-4 max-w-sm mx-auto p-3 bg-yellow-50 border border-yellow-200 rounded-xl flex items-start gap-2">
+                  <AlertTriangle className="w-5 h-5 text-yellow-600 flex-shrink-0 mt-0.5" />
+                  <p className="text-sm text-yellow-700">{cameraError}</p>
+                </div>
+              )}
+
+              {isScanning && (
+                <div className="mt-4 text-center">
+                  <button
+                    onClick={toggleScanner}
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg transition-colors text-sm"
+                  >
+                    <CameraOff size={16} />
+                    <span>关闭摄像头</span>
+                  </button>
+                </div>
+              )}
 
               <form onSubmit={handleQrSubmit} className="mt-6 max-w-sm mx-auto">
                 <div className="relative">
@@ -257,23 +455,67 @@ export default function CheckInPage() {
 
               {result && (
                 <div
-                  className={`mt-6 max-w-sm mx-auto p-4 rounded-xl flex items-center gap-3 animate-fade-in ${
-                    result.success ? 'bg-green-50 border border-green-200' : 'bg-red-50 border border-red-200'
-                  }`}
+                  className={`mt-6 max-w-sm mx-auto p-4 rounded-xl border flex items-start gap-3 animate-fade-in ${getResultStyle()}`}
                 >
-                  {result.success ? (
-                    <CheckCircle className="w-6 h-6 text-green-600 flex-shrink-0" />
-                  ) : (
-                    <XCircle className="w-6 h-6 text-red-600 flex-shrink-0" />
-                  )}
+                  {getResultIcon()}
                   <div className="flex-1 min-w-0">
-                    <p className={`font-medium ${result.success ? 'text-green-800' : 'text-red-800'}`}>
+                    <p
+                      className={`font-bold ${
+                        result.success
+                          ? 'text-green-800'
+                          : result.errorCode === 'already_checked_in'
+                            ? 'text-yellow-800'
+                            : result.errorCode === 'wrong_event'
+                              ? 'text-orange-800'
+                              : 'text-red-800'
+                      }`}
+                    >
+                      {getResultTitle()}
+                    </p>
+                    <p
+                      className={`text-sm mt-1 ${
+                        result.success
+                          ? 'text-green-600'
+                          : result.errorCode === 'already_checked_in'
+                            ? 'text-yellow-600'
+                            : result.errorCode === 'wrong_event'
+                              ? 'text-orange-600'
+                              : 'text-red-600'
+                      }`}
+                    >
                       {result.message}
                     </p>
                     {result.guest && (
-                      <p className={`text-sm ${result.success ? 'text-green-600' : 'text-red-600'}`}>
-                        {result.guest.name}
-                      </p>
+                      <div className="mt-2 pt-2 border-t border-current/20">
+                        <p
+                          className={`text-sm font-medium ${
+                            result.success
+                              ? 'text-green-700'
+                              : result.errorCode === 'already_checked_in'
+                                ? 'text-yellow-700'
+                                : result.errorCode === 'wrong_event'
+                                  ? 'text-orange-700'
+                                  : 'text-red-700'
+                          }`}
+                        >
+                          {result.guest.name}
+                        </p>
+                        {result.guest.company && (
+                          <p
+                            className={`text-xs ${
+                              result.success
+                                ? 'text-green-600'
+                                : result.errorCode === 'already_checked_in'
+                                  ? 'text-yellow-600'
+                                  : result.errorCode === 'wrong_event'
+                                    ? 'text-orange-600'
+                                    : 'text-red-600'
+                            }`}
+                          >
+                            {result.guest.company}
+                          </p>
+                        )}
+                      </div>
                     )}
                   </div>
                 </div>
@@ -294,7 +536,7 @@ export default function CheckInPage() {
                   <p className="text-gray-500 text-sm">暂无签到记录</p>
                 </div>
               ) : (
-                <div className="space-y-2">
+                <div className="space-y-2 max-h-96 overflow-y-auto">
                   {recentCheckIns.map((guest, index) => (
                     <div
                       key={guest.id + index}
@@ -312,6 +554,17 @@ export default function CheckInPage() {
                         <p className="text-xs text-gray-500 truncate">
                           {guest.company}
                         </p>
+                        {guest.seatZoneId && (
+                          <p className="text-xs text-primary-600 mt-0.5 flex items-center gap-1">
+                            <MapPin size={12} />
+                            {guest.seatZoneId === 'zone-vip-001'
+                              ? 'VIP区'
+                              : guest.seatZoneId === 'zone-media-001'
+                                ? '媒体区'
+                                : '普通区'}
+                            {guest.seatNumber ? ` - ${guest.seatNumber}号` : ''}
+                          </p>
+                        )}
                       </div>
                       <CheckCircle className="w-5 h-5 text-green-500 flex-shrink-0" />
                     </div>

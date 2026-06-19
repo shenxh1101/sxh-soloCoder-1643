@@ -33,6 +33,9 @@ export interface Guest {
   seatZoneId?: string;
   seatNumber?: string;
   forumIds: string[];
+  inviteStatus: 'unsent' | 'sent' | 'failed';
+  inviteSentAt?: string;
+  inviteMethod?: 'email' | 'sms';
   createdAt: string;
 }
 
@@ -80,6 +83,39 @@ export interface ReportData {
   }[];
 }
 
+export interface InvitationRecord {
+  id: string;
+  guestId: string;
+  eventId: string;
+  method: 'email' | 'sms';
+  status: 'sent' | 'failed';
+  sentAt: string;
+  errorMessage?: string;
+}
+
+export interface ImportGuestRow {
+  name: string;
+  company: string;
+  position: string;
+  phone: string;
+  email: string;
+  rowIndex: number;
+  valid: boolean;
+  errors: string[];
+  isDuplicatePhone: boolean;
+  isDuplicateEmail: boolean;
+}
+
+export interface ImportResult {
+  total: number;
+  valid: number;
+  invalid: number;
+  duplicates: number;
+  imported: number;
+  guests: Guest[];
+  errors: string[];
+}
+
 export interface DatabaseData {
   users: User[];
   events: Event[];
@@ -87,4 +123,5 @@ export interface DatabaseData {
   checkIns: CheckInRecord[];
   seatZones: SeatZone[];
   forums: Forum[];
+  invitations: InvitationRecord[];
 }

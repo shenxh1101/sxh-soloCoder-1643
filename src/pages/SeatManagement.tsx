@@ -1,6 +1,18 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { Plus, Edit2, Trash2, Users, UserCheck, LayoutGrid } from 'lucide-react';
+import {
+  Plus,
+  Edit2,
+  Trash2,
+  Users,
+  UserCheck,
+  LayoutGrid,
+  X,
+  CheckSquare,
+  Square,
+  Hash,
+  UserPlus,
+} from 'lucide-react';
 import { seatsApi, guestsApi, eventsApi } from '@/api';
 import type { SeatZone, Guest, Event } from '@shared/types';
 
@@ -17,6 +29,11 @@ export default function SeatManagement() {
   const [editingZone, setEditingZone] = useState<SeatZone | null>(null);
   const [loading, setLoading] = useState(true);
   const [showAssignModal, setShowAssignModal] = useState(false);
+  const [selectedGuests, setSelectedGuests] = useState<Set<string>>(new Set());
+  const [startSeatNumber, setStartSeatNumber] = useState(1);
+  const [showEditSeatModal, setShowEditSeatModal] = useState(false);
+  const [editingGuest, setEditingGuest] = useState<Guest | null>(null);
+  const [editSeatNumber, setEditSeatNumber] = useState('');
 
   const [formData, setFormData] = useState({
     name: '',
@@ -82,23 +99,65 @@ export default function SeatManagement() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!eventId || !confirm('确定要删除这个座位区域吗？')) return;
+    if (!eventId || !confirm('确定要删除这个座位区域吗？删除后该区域的嘉宾座位将被清空。'))
+      return;
     try {
       await seatsApi.deleteZone(eventId, id);
       loadData();
+      if (selectedZone === id) setSelectedZone(null);
     } catch (err) {
       alert('删除失败');
     }
   };
 
-  const handleAssignSeat = async (guestId: string, zoneId: string) => {
+  const handleBulkAssign = async () => {
+    if (!eventId || !selectedZone || selectedGuests.size === 0) return;
+    try {
+      const result = await seatsApi.bulkAssignSeats(
+        eventId,
+        selectedZone,
+        Array.from(selectedGuests),
+        startSeatNumber,
+      );
+      alert(`成功分配 ${result.assignedCount} 个座位`);
+      setShowAssignModal(false);
+      setSelectedGuests(new Set());
+      loadData();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '分配失败');
+    }
+  };
+
+  const handleRemoveSeat = async (guestId: string) => {
     if (!eventId) return;
     try {
-      await guestsApi.updateSeat(eventId, guestId, zoneId);
+      await guestsApi.updateSeat(eventId, guestId, undefined, undefined);
       loadData();
-      setShowAssignModal(false);
     } catch (err) {
-      alert('分配失败');
+      alert('移除失败');
+    }
+  };
+
+  const handleOpenEditSeat = (guest: Guest) => {
+    setEditingGuest(guest);
+    setEditSeatNumber(guest.seatNumber || '');
+    setShowEditSeatModal(true);
+  };
+
+  const handleSaveSeatNumber = async () => {
+    if (!eventId || !editingGuest) return;
+    try {
+      await guestsApi.updateSeat(
+        eventId,
+        editingGuest.id,
+        editingGuest.seatZoneId,
+        editSeatNumber || undefined,
+      );
+      setShowEditSeatModal(false);
+      setEditingGuest(null);
+      loadData();
+    } catch (err) {
+      alert('保存失败');
     }
   };
 
@@ -112,7 +171,31 @@ export default function SeatManagement() {
   };
 
   const getZoneGuests = (zoneId: string) => {
-    return guests.filter((g) => g.seatZoneId === zoneId);
+    return guests.filter((g) => g.seatZoneId === zoneId).sort((a, b) => {
+      const numA = parseInt(a.seatNumber || '0');
+      const numB = parseInt(b.seatNumber || '0');
+      return numA - numB;
+    });
+  };
+
+  const toggleGuestSelection = (guestId: string) => {
+    setSelectedGuests((prev) => {
+      const next = new Set(prev);
+      if (next.has(guestId)) {
+        next.delete(guestId);
+      } else {
+        next.add(guestId);
+      }
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedGuests.size === unassignedGuests.length) {
+      setSelectedGuests(new Set());
+    } else {
+      setSelectedGuests(new Set(unassignedGuests.map((g) => g.id)));
+    }
   };
 
   const typeColors: Record<string, string> = {
@@ -120,6 +203,27 @@ export default function SeatManagement() {
     media: '#3b82f6',
     general: '#6b7280',
     custom: '#6b7280',
+  };
+
+  const getZoneName = (zoneId?: string) => {
+    if (!zoneId) return '';
+    return zones.find((z) => z.id === zoneId)?.name || '';
+  };
+
+  const getNextSeatNumber = () => {
+    if (!selectedZone) return 1;
+    const zoneGuests = getZoneGuests(selectedZone);
+    if (zoneGuests.length === 0) return 1;
+    const maxNum = Math.max(
+      ...zoneGuests.map((g) => parseInt(g.seatNumber || '0')),
+    );
+    return maxNum + 1;
+  };
+
+  const openAssignModal = () => {
+    setSelectedGuests(new Set());
+    setStartSeatNumber(getNextSeatNumber());
+    setShowAssignModal(true);
   };
 
   if (loading) {
@@ -241,11 +345,11 @@ export default function SeatManagement() {
               </p>
             </div>
             <button
-              onClick={() => setShowAssignModal(true)}
+              onClick={openAssignModal}
               className="flex items-center gap-2 px-4 py-2 bg-primary-100 hover:bg-primary-200 text-primary-700 rounded-xl transition-all text-sm font-medium"
             >
-              <Plus size={16} />
-              分配嘉宾
+              <UserPlus size={16} />
+              批量分配
             </button>
           </div>
 
@@ -260,7 +364,7 @@ export default function SeatManagement() {
                 {getZoneGuests(selectedZone).map((guest) => (
                   <div
                     key={guest.id}
-                    className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl"
+                    className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl group"
                   >
                     <div className="w-10 h-10 rounded-full bg-primary-100 flex items-center justify-center flex-shrink-0">
                       <span className="text-primary-700 font-medium text-sm">
@@ -274,8 +378,16 @@ export default function SeatManagement() {
                       <p className="text-xs text-gray-500 truncate">{guest.company}</p>
                     </div>
                     <button
-                      onClick={() => handleAssignSeat(guest.id, '')}
-                      className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+                      onClick={() => handleOpenEditSeat(guest)}
+                      className="flex items-center gap-1 px-2 py-1 text-xs text-gray-500 hover:text-primary-600 hover:bg-primary-50 rounded transition-all"
+                      title="编辑座位号"
+                    >
+                      <Hash size={14} />
+                      <span>{guest.seatNumber || '无座号'}</span>
+                    </button>
+                    <button
+                      onClick={() => handleRemoveSeat(guest.id)}
+                      className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
                       title="移除"
                     >
                       <Trash2 size={14} />
@@ -291,10 +403,16 @@ export default function SeatManagement() {
       {showModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl w-full max-w-md animate-fade-in">
-            <div className="p-6 border-b border-gray-100">
+            <div className="p-6 border-b border-gray-100 flex items-center justify-between">
               <h2 className="text-xl font-serif font-bold text-gray-900">
                 {editingZone ? '编辑区域' : '添加座位区域'}
               </h2>
+              <button
+                onClick={() => setShowModal(false)}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <X size={20} className="text-gray-500" />
+              </button>
             </div>
             <form onSubmit={handleSubmit} className="p-6 space-y-4">
               <div>
@@ -381,11 +499,50 @@ export default function SeatManagement() {
 
       {showAssignModal && selectedZone && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-md max-h-[80vh] flex flex-col animate-fade-in">
-            <div className="p-6 border-b border-gray-100">
-              <h2 className="text-xl font-serif font-bold text-gray-900">分配嘉宾</h2>
-              <p className="text-sm text-gray-500 mt-1">选择要分配到该区域的嘉宾</p>
+          <div className="bg-white rounded-2xl w-full max-w-lg max-h-[85vh] flex flex-col animate-fade-in">
+            <div className="p-6 border-b border-gray-100 flex items-center justify-between">
+              <div>
+                <h2 className="text-xl font-serif font-bold text-gray-900">批量分配座位</h2>
+                <p className="text-sm text-gray-500 mt-1">
+                  {getZoneName(selectedZone)} - 选择嘉宾并分配座位
+                </p>
+              </div>
+              <button
+                onClick={() => setShowAssignModal(false)}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <X size={20} className="text-gray-500" />
+              </button>
             </div>
+
+            <div className="p-4 border-b border-gray-100">
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-2">
+                  <label className="text-sm text-gray-600">起始座位号：</label>
+                  <input
+                    type="number"
+                    value={startSeatNumber}
+                    onChange={(e) => setStartSeatNumber(Number(e.target.value))}
+                    min={1}
+                    className="w-24 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+                  />
+                </div>
+                <div className="flex-1" />
+                <button
+                  onClick={toggleSelectAll}
+                  className="flex items-center gap-2 text-sm text-gray-600 hover:text-primary-600"
+                >
+                  {selectedGuests.size === unassignedGuests.length &&
+                  unassignedGuests.length > 0 ? (
+                    <CheckSquare size={18} className="text-primary-600" />
+                  ) : (
+                    <Square size={18} />
+                  )}
+                  <span>全选</span>
+                </button>
+              </div>
+            </div>
+
             <div className="flex-1 overflow-y-auto p-4">
               {unassignedGuests.length === 0 ? (
                 <div className="text-center py-8 text-gray-500">
@@ -396,9 +553,18 @@ export default function SeatManagement() {
                   {unassignedGuests.map((guest) => (
                     <button
                       key={guest.id}
-                      onClick={() => handleAssignSeat(guest.id, selectedZone)}
-                      className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-gray-50 transition-colors text-left"
+                      onClick={() => toggleGuestSelection(guest.id)}
+                      className={`w-full flex items-center gap-3 p-3 rounded-xl transition-colors text-left ${
+                        selectedGuests.has(guest.id)
+                          ? 'bg-primary-50 border-2 border-primary-500'
+                          : 'bg-gray-50 border-2 border-transparent hover:bg-gray-100'
+                      }`}
                     >
+                      {selectedGuests.has(guest.id) ? (
+                        <CheckSquare size={18} className="text-primary-600 flex-shrink-0" />
+                      ) : (
+                        <Square size={18} className="text-gray-400 flex-shrink-0" />
+                      )}
                       <div className="w-10 h-10 rounded-full bg-primary-100 flex items-center justify-center flex-shrink-0">
                         <span className="text-primary-700 font-medium text-sm">
                           {guest.name.charAt(0)}
@@ -410,19 +576,84 @@ export default function SeatManagement() {
                         </p>
                         <p className="text-xs text-gray-500 truncate">{guest.company}</p>
                       </div>
-                      <Plus size={18} className="text-gray-400" />
                     </button>
                   ))}
                 </div>
               )}
             </div>
-            <div className="p-4 border-t border-gray-100">
+
+            <div className="p-4 border-t border-gray-100 flex gap-3">
               <button
                 onClick={() => setShowAssignModal(false)}
-                className="w-full py-2.5 px-4 border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 transition-all"
+                className="flex-1 py-2.5 px-4 border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 transition-all"
               >
-                关闭
+                取消
               </button>
+              <button
+                onClick={handleBulkAssign}
+                disabled={selectedGuests.size === 0}
+                className="flex-1 py-2.5 px-4 bg-primary-700 hover:bg-primary-600 text-white rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                确认分配 ({selectedGuests.size} 人)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showEditSeatModal && editingGuest && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl w-full max-w-sm animate-fade-in">
+            <div className="p-6 border-b border-gray-100 flex items-center justify-between">
+              <h2 className="text-lg font-serif font-bold text-gray-900">编辑座位号</h2>
+              <button
+                onClick={() => setShowEditSeatModal(false)}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <X size={20} className="text-gray-500" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-full bg-primary-100 flex items-center justify-center">
+                  <span className="text-primary-700 font-bold">
+                    {editingGuest.name.charAt(0)}
+                  </span>
+                </div>
+                <div>
+                  <p className="font-medium text-gray-900">{editingGuest.name}</p>
+                  <p className="text-sm text-gray-500">{editingGuest.company}</p>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  座位号
+                </label>
+                <input
+                  type="text"
+                  value={editSeatNumber}
+                  onChange={(e) => setEditSeatNumber(e.target.value)}
+                  placeholder="如：A01、12、VIP-05"
+                  className="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                />
+                <p className="text-xs text-gray-500 mt-2">留空则不显示座位号</p>
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  onClick={() => setShowEditSeatModal(false)}
+                  className="flex-1 py-2.5 px-4 border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 transition-all"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={handleSaveSeatNumber}
+                  className="flex-1 py-2.5 px-4 bg-primary-700 hover:bg-primary-600 text-white rounded-xl transition-all"
+                >
+                  保存
+                </button>
+              </div>
             </div>
           </div>
         </div>

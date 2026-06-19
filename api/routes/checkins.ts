@@ -21,17 +21,17 @@ router.post('/', (req: Request, res: Response): void => {
   }
 
   if (!guest) {
-    res.status(404).json({ error: '未找到对应嘉宾' });
+    res.status(404).json({ error: '二维码无效或未找到对应嘉宾', errorCode: 'invalid_qrcode' });
     return;
   }
 
   if (guest.eventId !== eventId) {
-    res.status(400).json({ error: '嘉宾不属于该活动' });
+    res.status(400).json({ error: '该嘉宾不属于当前活动', errorCode: 'wrong_event', guest });
     return;
   }
 
   if (guest.checkInStatus === 'checked_in') {
-    res.status(400).json({ error: '嘉宾已签到', guest });
+    res.status(400).json({ error: '嘉宾已签到，请勿重复签到', errorCode: 'already_checked_in', guest });
     return;
   }
 

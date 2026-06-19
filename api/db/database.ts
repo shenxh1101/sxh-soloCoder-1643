@@ -9,6 +9,9 @@ import type {
   CheckInRecord,
   SeatZone,
   Forum,
+  InvitationRecord,
+  ImportGuestRow,
+  ImportResult,
 } from '../../shared/types.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -64,6 +67,7 @@ function getInitialData(): DatabaseData {
     ],
     guests: [],
     checkIns: [],
+    invitations: [],
     seatZones: [
       {
         id: 'zone-vip-001',
@@ -94,6 +98,53 @@ function getInitialData(): DatabaseData {
   };
 }
 
+function migrateData(data: DatabaseData): DatabaseData {
+  let needsSave = false;
+
+  if (!data.invitations) {
+    data.invitations = [];
+    needsSave = true;
+  }
+
+  if (!data.forums) {
+    data.forums = [];
+    needsSave = true;
+  }
+
+  for (const guest of data.guests) {
+    if (guest.inviteStatus === undefined) {
+      guest.inviteStatus = 'unsent';
+      needsSave = true;
+    }
+    if (guest.forumIds === undefined) {
+      guest.forumIds = [];
+      needsSave = true;
+    }
+    if (guest.seatZoneId === undefined) {
+      guest.seatZoneId = undefined;
+      needsSave = true;
+    }
+    if (guest.seatNumber === undefined) {
+      guest.seatNumber = undefined;
+      needsSave = true;
+    }
+    if (guest.inviteSentAt === undefined) {
+      guest.inviteSentAt = undefined;
+      needsSave = true;
+    }
+    if (guest.inviteMethod === undefined) {
+      guest.inviteMethod = undefined;
+      needsSave = true;
+    }
+  }
+
+  if (needsSave) {
+    writeDatabase(data);
+  }
+
+  return data;
+}
+
 export function readDatabase(): DatabaseData {
   ensureDataDir();
   if (!fs.existsSync(DATA_FILE)) {
@@ -103,7 +154,8 @@ export function readDatabase(): DatabaseData {
   }
   try {
     const data = fs.readFileSync(DATA_FILE, 'utf-8');
-    return JSON.parse(data);
+    const parsedData = JSON.parse(data) as DatabaseData;
+    return migrateData(parsedData);
   } catch {
     const initialData = getInitialData();
     fs.writeFileSync(DATA_FILE, JSON.stringify(initialData, null, 2));
@@ -178,6 +230,8 @@ export const db = {
     const newGuest: Guest = {
       ...guest,
       id: generateId('guest'),
+      inviteStatus: 'unsent',
+      forumIds: guest.forumIds || [],
       createdAt: new Date().toISOString(),
     };
     data.guests.push(newGuest);
@@ -300,5 +354,49 @@ export const db = {
     forum.guestIds = forum.guestIds.filter((id) => id !== guestId);
     writeDatabase(data);
     return true;
+  },
+
+  getInvitationsByEvent: (eventId: string): InvitationRecord[] =>
+    readDatabase().invitations.filter((i) => i.eventId === eventId),
+  getInvitationsByGuest: (guestId: string): InvitationRecord[] =>
+    readDatabase().invitations.filter((i) => i.guestId === guestId),
+  addInvitation: (record: Omit<InvitationRecord, 'id'>): InvitationRecord => {
+    const data = readDatabase();
+    const newRecord: InvitationRecord = {
+      ...record,
+      id: generateId('inv'),
+    };
+    data.invitations.push(newRecord);
+    writeDatabase(data);
+    return newRecord;
+  },
+
+  getGuestByPhone: (eventId: string, phone: string): Guest | undefined =>
+    readDatabase().guests.find((g) => g.eventId === eventId && g.phone === phone),
+  getGuestByEmail: (eventId: string, email: string): Guest | undefined =>
+    readDatabase().guests.find((g) => g.eventId === eventId && g.email === email),
+
+  bulkAssignSeats: (
+    eventId: string,
+    zoneId: string,
+    guestIds: string[],
+    startNumber?: number,
+  ): Guest[] => {
+    const data = readDatabase();
+    let seatNum = startNumber || 1;
+    const updatedGuests: Guest[] = [];
+
+    for (const guestId of guestIds) {
+      const guest = data.guests.find((g) => g.id === guestId && g.eventId === eventId);
+      if (guest) {
+        guest.seatZoneId = zoneId;
+        guest.seatNumber = String(seatNum);
+        seatNum++;
+        updatedGuests.push(guest);
+      }
+    }
+
+    writeDatabase(data);
+    return updatedGuests;
   },
 };

@@ -65,4 +65,39 @@ router.delete('/zones/:zoneId', (req: Request, res: Response): void => {
   res.json({ message: '删除成功' });
 });
 
+router.post('/zones/:zoneId/bulk-assign', (req: Request, res: Response): void => {
+  const { eventId, zoneId } = req.params;
+  const { guestIds, startNumber } = req.body;
+
+  if (!guestIds || !Array.isArray(guestIds)) {
+    res.status(400).json({ error: '请选择要分配的嘉宾' });
+    return;
+  }
+
+  const zone = db.getSeatZoneById(zoneId);
+  if (!zone || zone.eventId !== eventId) {
+    res.status(404).json({ error: '座位区域不存在' });
+    return;
+  }
+
+  const currentCount = db
+    .getGuestsByEvent(eventId)
+    .filter((g) => g.seatZoneId === zoneId).length;
+
+  if (currentCount + guestIds.length > zone.capacity) {
+    res.status(400).json({ error: '超出区域容量限制' });
+    return;
+  }
+
+  const actualStart = startNumber ? Number(startNumber) : currentCount + 1;
+
+  const updatedGuests = db.bulkAssignSeats(eventId, zoneId, guestIds, actualStart);
+
+  res.json({
+    success: true,
+    assignedCount: updatedGuests.length,
+    guests: updatedGuests,
+  });
+});
+
 export default router;

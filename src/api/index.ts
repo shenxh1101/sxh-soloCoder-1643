@@ -6,6 +6,8 @@ import type {
   SeatZone,
   Forum,
   ReportData,
+  ImportGuestRow,
+  ImportResult,
 } from '../../shared/types';
 
 const API_BASE = '/api';
@@ -20,8 +22,10 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
   });
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: '请求失败' }));
-    throw new Error(error.error || '请求失败');
+    const errorData = await response.json().catch(() => ({ error: '请求失败' }));
+    const error = new Error(errorData.error || '请求失败');
+    (error as any).data = errorData;
+    throw error;
   }
 
   return response.json();
@@ -80,6 +84,49 @@ export const guestsApi = {
       method: 'PUT',
       body: JSON.stringify({ seatZoneId, seatNumber }),
     }),
+  getInvitePreview: (eventId: string, guestId: string, method: 'email' | 'sms') =>
+    request<{
+      method: string;
+      subject: string;
+      content: string;
+      checkInLink: string;
+      qrCode: string;
+    }>(`/events/${eventId}/guests/${guestId}/invite/preview`, {
+      method: 'POST',
+      body: JSON.stringify({ method }),
+    }),
+  sendInvite: (eventId: string, guestId: string, method: 'email' | 'sms') =>
+    request<{ success: boolean; message: string; guest: Guest }>(
+      `/events/${eventId}/guests/${guestId}/invite/send`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ method }),
+      },
+    ),
+  validateImport: (eventId: string, fileBase64: string) =>
+    request<{
+      total: number;
+      valid: number;
+      invalid: number;
+      duplicates: number;
+      rows: ImportGuestRow[];
+    }>(`/events/${eventId}/guests/import/validate`, {
+      method: 'POST',
+      body: JSON.stringify({ file: { data: fileBase64 } }),
+    }),
+  importGuests: (eventId: string, fileBase64: string, skipDuplicates?: boolean) =>
+    request<ImportResult>(`/events/${eventId}/guests/import`, {
+      method: 'POST',
+      body: JSON.stringify({ file: { data: fileBase64 }, skipDuplicates }),
+    }),
+  bulkInvite: (eventId: string, method: 'email' | 'sms', guestIds: string[]) =>
+    request<{ success: boolean; successCount: number; failedCount: number; total: number }>(
+      `/events/${eventId}/guests/bulk-invite`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ method, guestIds }),
+      },
+    ),
 };
 
 export const checkInsApi = {
@@ -112,6 +159,14 @@ export const seatsApi = {
     }),
   deleteZone: (eventId: string, zoneId: string) =>
     request(`/events/${eventId}/seats/zones/${zoneId}`, { method: 'DELETE' }),
+  bulkAssignSeats: (eventId: string, zoneId: string, guestIds: string[], startNumber?: number) =>
+    request<{ success: boolean; assignedCount: number; guests: Guest[] }>(
+      `/events/${eventId}/seats/zones/${zoneId}/bulk-assign`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ guestIds, startNumber }),
+      },
+    ),
 };
 
 export const reportsApi = {
