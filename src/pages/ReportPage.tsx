@@ -9,12 +9,14 @@ import {
   TrendingUp,
   PieChart,
 } from 'lucide-react';
-import { reportsApi, eventsApi, exportApi } from '@/api';
-import type { ReportData, Event } from '@shared/types';
+import { reportsApi, eventsApi, exportApi, seatsApi } from '@/api';
+import type { ReportData, Event, SeatZone } from '@shared/types';
+import { getZoneColor } from '@/lib/utils';
 
 export default function ReportPage() {
   const { eventId } = useParams<{ eventId: string }>();
   const [event, setEvent] = useState<Event | null>(null);
+  const [zones, setZones] = useState<SeatZone[]>([]);
   const [report, setReport] = useState<ReportData | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -28,12 +30,14 @@ export default function ReportPage() {
     if (!eventId) return;
     try {
       setLoading(true);
-      const [eventData, reportData] = await Promise.all([
+      const [eventData, reportData, zonesData] = await Promise.all([
         eventsApi.getById(eventId),
         reportsApi.getReport(eventId),
+        seatsApi.getZones(eventId),
       ]);
       setEvent(eventData);
       setReport(reportData);
+      setZones(zonesData);
     } catch (err) {
       console.error('加载数据失败:', err);
     } finally {
@@ -253,12 +257,7 @@ export default function ReportPage() {
               {report?.zoneStats.map((zone) => {
                 const total = report.totalGuests;
                 const percent = total > 0 ? ((zone.total / total) * 100).toFixed(1) : '0';
-                const colors: Record<string, string> = {
-                  VIP区: '#d4af37',
-                  媒体区: '#3b82f6',
-                  普通区: '#6b7280',
-                };
-                const color = colors[zone.zoneName] || '#6b7280';
+                const color = getZoneColor(zone.zoneId, zones);
                 return (
                   <div key={zone.zoneId} className="text-center">
                     <div

@@ -41,7 +41,8 @@
       "forumIds": [],
       "id": "guest-1781911380387-ksyjhe",
       "createdAt": "2026-06-19T23:23:00.387Z",
-      "checkInTime": "2026-06-19T23:24:38.168Z"
+      "checkInTime": "2026-06-19T23:24:38.168Z",
+      "inviteStatus": "unsent"
     }
   ],
   "checkIns": [
@@ -90,5 +91,6 @@
       "id": "forum-1781911515590-hdf3x2",
       "guestIds": []
     }
-  ]
+  ],
+  "invitations": []
 }

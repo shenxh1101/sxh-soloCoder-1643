@@ -22,16 +22,21 @@ import {
   ChevronDown,
   CheckSquare,
   Square,
+  Filter,
+  RefreshCw,
+  FileSpreadsheet,
 } from 'lucide-react';
-import { guestsApi, eventsApi } from '@/api';
-import type { Guest, Event, ImportGuestRow } from '@shared/types';
+import { guestsApi, eventsApi, seatsApi } from '@/api';
+import type { Guest, Event, SeatZone, ImportGuestRow, ImportDuplicateStrategy, ImportResult } from '@shared/types';
 import * as XLSX from 'xlsx';
+import { getZoneName } from '@/lib/utils';
 
 export default function GuestManagement() {
   const { eventId } = useParams<{ eventId: string }>();
   const navigate = useNavigate();
   const [guests, setGuests] = useState<Guest[]>([]);
   const [event, setEvent] = useState<Event | null>(null);
+  const [zones, setZones] = useState<SeatZone[]>([]);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
@@ -52,9 +57,13 @@ export default function GuestManagement() {
     duplicates: number;
     rows: ImportGuestRow[];
   } | null>(null);
+  const [importResult, setImportResult] = useState<ImportResult | null>(null);
+  const [importStep, setImportStep] = useState<'upload' | 'preview' | 'strategy' | 'result'>('upload');
+  const [duplicateStrategy, setDuplicateStrategy] = useState<ImportDuplicateStrategy>('skip');
   const [selectedGuests, setSelectedGuests] = useState<Set<string>>(new Set());
   const [showBulkInviteModal, setShowBulkInviteModal] = useState(false);
   const [bulkInviteMethod, setBulkInviteMethod] = useState<'email' | 'sms'>('email');
+  const [inviteStatusFilter, setInviteStatusFilter] = useState<string>('all');
 
   const [formData, setFormData] = useState({
     name: '',
@@ -68,18 +77,30 @@ export default function GuestManagement() {
     if (eventId) {
       loadData();
     }
-  }, [eventId]);
+  }, [eventId, inviteStatusFilter]);
+
+  const resetImportModal = () => {
+    setShowImportModal(false);
+    setImportFile(null);
+    setImportPreview(null);
+    setImportResult(null);
+    setImportStep('upload');
+    setDuplicateStrategy('skip');
+  };
 
   const loadData = async () => {
     if (!eventId) return;
     try {
       setLoading(true);
-      const [eventData, guestsData] = await Promise.all([
+      const statusFilter = inviteStatusFilter === 'all' ? undefined : inviteStatusFilter;
+      const [eventData, guestsData, zonesData] = await Promise.all([
         eventsApi.getById(eventId),
-        guestsApi.getByEvent(eventId),
+        guestsApi.getByEvent(eventId, statusFilter),
+        seatsApi.getZones(eventId),
       ]);
       setEvent(eventData);
       setGuests(guestsData);
+      setZones(zonesData);
     } catch (err) {
       console.error('加载数据失败:', err);
     } finally {
@@ -198,6 +219,7 @@ export default function GuestManagement() {
 
     setImportFile(file);
     setImportPreview(null);
+    setImportStep('preview');
 
     try {
       const reader = new FileReader();
@@ -209,16 +231,18 @@ export default function GuestManagement() {
             setImportPreview(result);
           } catch (err) {
             alert(err instanceof Error ? err.message : '文件解析失败');
+            setImportStep('upload');
           }
         }
       };
       reader.readAsDataURL(file);
     } catch (err) {
       alert('文件读取失败');
+      setImportStep('upload');
     }
   };
 
-  const handleImport = async (skipDuplicates: boolean) => {
+  const handleImport = async () => {
     if (!eventId || !importFile) return;
 
     try {
@@ -227,13 +251,9 @@ export default function GuestManagement() {
         const base64 = (event.target?.result as string)?.split(',')[1];
         if (base64) {
           try {
-            const result = await guestsApi.importGuests(eventId, base64, skipDuplicates);
-            alert(
-              `导入完成！共导入 ${result.imported} 位嘉宾，跳过 ${result.duplicates} 条重复`,
-            );
-            setShowImportModal(false);
-            setImportFile(null);
-            setImportPreview(null);
+            const result = await guestsApi.importGuests(eventId, base64, duplicateStrategy);
+            setImportResult(result);
+            setImportStep('result');
             loadData();
           } catch (err) {
             alert(err instanceof Error ? err.message : '导入失败');
@@ -244,6 +264,39 @@ export default function GuestManagement() {
     } catch (err) {
       alert('文件读取失败');
     }
+  };
+
+  const getRowStatusBadge = (row: ImportGuestRow) => {
+    if (!row.valid) {
+      if (row.isDuplicateInFile) {
+        return (
+          <span className="flex items-center gap-1 text-orange-600">
+            <AlertCircle size={14} />
+            <span className="text-xs">文件内重复</span>
+          </span>
+        );
+      }
+      if (row.isDuplicatePhone || row.isDuplicateEmail) {
+        return (
+          <span className="flex items-center gap-1 text-yellow-600">
+            <AlertCircle size={14} />
+            <span className="text-xs">已存在</span>
+          </span>
+        );
+      }
+      return (
+        <span className="flex items-center gap-1 text-red-600">
+          <AlertCircle size={14} />
+          <span className="text-xs">{row.errors.join('、')}</span>
+        </span>
+      );
+    }
+    return (
+      <span className="flex items-center gap-1 text-green-600">
+        <CheckCircle size={14} />
+        <span className="text-xs">有效</span>
+      </span>
+    );
   };
 
   const toggleGuestSelection = (guestId: string) => {
@@ -319,13 +372,6 @@ export default function GuestManagement() {
     return status === 'checked_in' ? '已签到' : '未签到';
   };
 
-  const getZoneName = (zoneId?: string) => {
-    if (!zoneId) return '';
-    if (zoneId === 'zone-vip-001') return 'VIP区';
-    if (zoneId === 'zone-media-001') return '媒体区';
-    return '普通区';
-  };
-
   const downloadTemplate = () => {
     const template = [
       { 姓名: '张三', 公司: '某某科技有限公司', 职位: 'CEO', 手机: '13800138000', 邮箱: 'zhangsan@example.com' },
@@ -384,8 +430,8 @@ export default function GuestManagement() {
       </div>
 
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-        <div className="p-4 border-b border-gray-100 flex items-center justify-between">
-          <div className="flex items-center gap-4">
+        <div className="p-4 border-b border-gray-100 flex items-center justify-between gap-4 flex-wrap">
+          <div className="flex items-center gap-4 flex-wrap">
             <button
               onClick={toggleSelectAll}
               className="flex items-center gap-2 text-sm text-gray-600 hover:text-primary-600"
@@ -397,7 +443,7 @@ export default function GuestManagement() {
               )}
               <span>全选</span>
             </button>
-            <div className="relative flex-1 max-w-md">
+            <div className="relative flex-1 max-w-md min-w-[200px]">
               <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
               <input
                 type="text"
@@ -407,6 +453,25 @@ export default function GuestManagement() {
                 className="w-full pl-12 pr-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary-500 focus:bg-white transition-all"
               />
             </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 text-sm text-gray-500">
+              <Filter size={16} />
+              <span>邀请状态:</span>
+            </div>
+            <select
+              value={inviteStatusFilter}
+              onChange={(e) => {
+                setInviteStatusFilter(e.target.value);
+                setSelectedGuests(new Set());
+              }}
+              className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+            >
+              <option value="all">全部</option>
+              <option value="unsent">未发送</option>
+              <option value="sent">已发送</option>
+              <option value="failed">发送失败</option>
+            </select>
           </div>
         </div>
 
@@ -512,7 +577,7 @@ export default function GuestManagement() {
                     <td className="px-6 py-4 text-sm text-gray-600">
                       {guest.seatZoneId ? (
                         <span className="text-gray-700">
-                          {getZoneName(guest.seatZoneId)}
+                          {getZoneName(guest.seatZoneId, zones)}
                           {guest.seatNumber ? ` - ${guest.seatNumber}号` : ''}
                         </span>
                       ) : (
@@ -771,25 +836,70 @@ export default function GuestManagement() {
 
       {showImportModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-3xl max-h-[90vh] flex flex-col animate-fade-in">
+          <div className="bg-white rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col animate-fade-in">
             <div className="p-6 border-b border-gray-100 flex items-center justify-between">
-              <h2 className="text-xl font-serif font-bold text-gray-900">批量导入嘉宾</h2>
+              <div>
+                <h2 className="text-xl font-serif font-bold text-gray-900">批量导入嘉宾</h2>
+                <p className="text-sm text-gray-500 mt-1">
+                  步骤 {importStep === 'upload' ? '1' : importStep === 'preview' ? '2' : importStep === 'strategy' ? '3' : '4'} / 4 · {' '}
+                  {importStep === 'upload' ? '上传文件' : importStep === 'preview' ? '数据校验' : importStep === 'strategy' ? '选择策略' : '导入完成'}
+                </p>
+              </div>
               <button
-                onClick={() => {
-                  setShowImportModal(false);
-                  setImportFile(null);
-                  setImportPreview(null);
-                }}
+                onClick={resetImportModal}
                 className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
               >
                 <X size={20} className="text-gray-500" />
               </button>
             </div>
+
+            <div className="px-6 pt-4">
+              <div className="flex items-center gap-2">
+                {[
+                  { key: 'upload', label: '上传' },
+                  { key: 'preview', label: '校验' },
+                  { key: 'strategy', label: '策略' },
+                  { key: 'result', label: '完成' },
+                ].map((step, index) => {
+                  const isActive = step.key === importStep;
+                  const isPast =
+                    (importStep === 'preview' && step.key === 'upload') ||
+                    (importStep === 'strategy' && ['upload', 'preview'].includes(step.key)) ||
+                    (importStep === 'result' && ['upload', 'preview', 'strategy'].includes(step.key));
+                  return (
+                    <div key={step.key} className="flex items-center gap-2 flex-1">
+                      <div
+                        className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium transition-all ${
+                          isActive
+                            ? 'bg-primary-600 text-white'
+                            : isPast
+                              ? 'bg-green-500 text-white'
+                              : 'bg-gray-200 text-gray-500'
+                        }`}
+                      >
+                        {isPast ? <CheckCircle size={16} /> : index + 1}
+                      </div>
+                      <span
+                        className={`text-sm ${isActive ? 'text-primary-600 font-medium' : isPast ? 'text-green-600' : 'text-gray-400'}`}
+                      >
+                        {step.label}
+                      </span>
+                      {index < 3 && (
+                        <div
+                          className={`flex-1 h-0.5 ${isPast ? 'bg-green-500' : 'bg-gray-200'}`}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
             <div className="flex-1 overflow-y-auto p-6">
-              {!importFile ? (
+              {importStep === 'upload' && (
                 <div className="text-center py-12">
                   <div className="w-24 h-24 mx-auto mb-6 rounded-2xl bg-gray-50 border-2 border-dashed border-gray-200 flex items-center justify-center">
-                    <Upload className="w-10 h-10 text-gray-400" />
+                    <FileSpreadsheet className="w-10 h-10 text-gray-400" />
                   </div>
                   <h3 className="text-lg font-medium text-gray-900 mb-2">上传Excel文件</h3>
                   <p className="text-sm text-gray-500 mb-6">
@@ -814,7 +924,16 @@ export default function GuestManagement() {
                     </label>
                   </div>
                 </div>
-              ) : importPreview ? (
+              )}
+
+              {importStep === 'preview' && !importPreview && (
+                <div className="text-center py-12 text-gray-500">
+                  <div className="w-12 h-12 border-4 border-primary-200 border-t-primary-600 rounded-full animate-spin mx-auto mb-4"></div>
+                  <p>正在解析文件...</p>
+                </div>
+              )}
+
+              {importStep === 'preview' && importPreview && (
                 <div className="space-y-6">
                   <div className="grid grid-cols-4 gap-4">
                     <div className="p-4 bg-gray-50 rounded-xl text-center">
@@ -829,92 +948,318 @@ export default function GuestManagement() {
                       <p className="text-2xl font-bold text-red-600">{importPreview.invalid}</p>
                       <p className="text-sm text-red-600">无效</p>
                     </div>
-                    <div className="p-4 bg-yellow-50 rounded-xl text-center">
-                      <p className="text-2xl font-bold text-yellow-600">
+                    <div className="p-4 bg-orange-50 rounded-xl text-center">
+                      <p className="text-2xl font-bold text-orange-600">
                         {importPreview.duplicates}
                       </p>
-                      <p className="text-sm text-yellow-600">重复</p>
+                      <p className="text-sm text-orange-600">重复</p>
+                    </div>
+                  </div>
+
+                  <div className="border border-gray-200 rounded-xl overflow-hidden">
+                    <div className="px-4 py-3 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
+                      <p className="text-sm font-medium text-gray-700">数据预览</p>
+                      <div className="flex items-center gap-4 text-xs">
+                        <span className="flex items-center gap-1">
+                          <span className="w-3 h-3 rounded-full bg-green-500"></span>
+                          有效
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <span className="w-3 h-3 rounded-full bg-yellow-500"></span>
+                          系统内重复
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <span className="w-3 h-3 rounded-full bg-orange-500"></span>
+                          文件内重复
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <span className="w-3 h-3 rounded-full bg-red-500"></span>
+                          无效
+                        </span>
+                      </div>
+                    </div>
+                    <div className="max-h-80 overflow-y-auto">
+                      <table className="w-full text-sm">
+                        <thead className="bg-gray-50 sticky top-0">
+                          <tr>
+                            <th className="text-left px-4 py-2 text-gray-500 font-medium w-16">行号</th>
+                            <th className="text-left px-4 py-2 text-gray-500 font-medium">姓名</th>
+                            <th className="text-left px-4 py-2 text-gray-500 font-medium">公司</th>
+                            <th className="text-left px-4 py-2 text-gray-500 font-medium">手机</th>
+                            <th className="text-left px-4 py-2 text-gray-500 font-medium">邮箱</th>
+                            <th className="text-left px-4 py-2 text-gray-500 font-medium w-40">状态</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {importPreview.rows.map((row) => {
+                            let rowClass = '';
+                            if (row.isDuplicateInFile) rowClass = 'bg-orange-50';
+                            else if (row.isDuplicatePhone || row.isDuplicateEmail) rowClass = 'bg-yellow-50';
+                            else if (!row.valid) rowClass = 'bg-red-50';
+                            return (
+                              <tr key={row.rowIndex} className={rowClass}>
+                                <td className="px-4 py-2 text-gray-500">{row.rowIndex}</td>
+                                <td className="px-4 py-2 text-gray-900">{row.name || '-'}</td>
+                                <td className="px-4 py-2 text-gray-600">{row.company || '-'}</td>
+                                <td className="px-4 py-2 text-gray-600">{row.phone || '-'}</td>
+                                <td className="px-4 py-2 text-gray-600">{row.email || '-'}</td>
+                                <td className="px-4 py-2">{getRowStatusBadge(row)}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {importStep === 'strategy' && (
+                <div className="max-w-2xl mx-auto py-8 space-y-8">
+                  <div className="text-center">
+                    <h3 className="text-lg font-medium text-gray-900 mb-2">选择重复数据处理策略</h3>
+                    <p className="text-sm text-gray-500">
+                      检测到 {importPreview?.duplicates || 0} 条重复数据，请选择处理方式
+                    </p>
+                  </div>
+
+                  <div className="space-y-3">
+                    <button
+                      onClick={() => setDuplicateStrategy('skip')}
+                      className={`w-full p-4 rounded-xl border-2 text-left transition-all ${
+                        duplicateStrategy === 'skip'
+                          ? 'border-primary-500 bg-primary-50'
+                          : 'border-gray-200 hover:border-gray-300 bg-white'
+                      }`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <div
+                          className={`w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 mt-0.5 ${
+                            duplicateStrategy === 'skip' ? 'border-primary-500' : 'border-gray-300'
+                          }`}
+                        >
+                          {duplicateStrategy === 'skip' && <div className="w-3 h-3 rounded-full bg-primary-500" />}
+                        </div>
+                        <div>
+                          <p className={`font-medium ${duplicateStrategy === 'skip' ? 'text-primary-700' : 'text-gray-900'}`}>
+                            跳过重复
+                          </p>
+                          <p className="text-sm text-gray-500 mt-1">
+                            如果系统中已存在相同手机号或邮箱的嘉宾，跳过该条数据不导入
+                          </p>
+                        </div>
+                      </div>
+                    </button>
+
+                    <button
+                      onClick={() => setDuplicateStrategy('overwrite')}
+                      className={`w-full p-4 rounded-xl border-2 text-left transition-all ${
+                        duplicateStrategy === 'overwrite'
+                          ? 'border-primary-500 bg-primary-50'
+                          : 'border-gray-200 hover:border-gray-300 bg-white'
+                      }`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <div
+                          className={`w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 mt-0.5 ${
+                            duplicateStrategy === 'overwrite' ? 'border-primary-500' : 'border-gray-300'
+                          }`}
+                        >
+                          {duplicateStrategy === 'overwrite' && <div className="w-3 h-3 rounded-full bg-primary-500" />}
+                        </div>
+                        <div>
+                          <p className={`font-medium ${duplicateStrategy === 'overwrite' ? 'text-primary-700' : 'text-gray-900'}`}>
+                            覆盖原有信息
+                          </p>
+                          <p className="text-sm text-gray-500 mt-1">
+                            如果系统中已存在相同手机号或邮箱的嘉宾，用新数据覆盖原有信息
+                          </p>
+                        </div>
+                      </div>
+                    </button>
+
+                    <button
+                      onClick={() => setDuplicateStrategy('merge')}
+                      className={`w-full p-4 rounded-xl border-2 text-left transition-all ${
+                        duplicateStrategy === 'merge'
+                          ? 'border-primary-500 bg-primary-50'
+                          : 'border-gray-200 hover:border-gray-300 bg-white'
+                      }`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <div
+                          className={`w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 mt-0.5 ${
+                            duplicateStrategy === 'merge' ? 'border-primary-500' : 'border-gray-300'
+                          }`}
+                        >
+                          {duplicateStrategy === 'merge' && <div className="w-3 h-3 rounded-full bg-primary-500" />}
+                        </div>
+                        <div>
+                          <p className={`font-medium ${duplicateStrategy === 'merge' ? 'text-primary-700' : 'text-gray-900'}`}>
+                            合并补充联系方式
+                          </p>
+                          <p className="text-sm text-gray-500 mt-1">
+                            如果系统中已存在相同手机号或邮箱的嘉宾，仅补充原有空白字段的信息
+                          </p>
+                        </div>
+                      </div>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {importStep === 'result' && importResult && (
+                <div className="space-y-6">
+                  <div className="text-center py-4">
+                    <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-green-100 flex items-center justify-center">
+                      <CheckCircle className="w-8 h-8 text-green-600" />
+                    </div>
+                    <h3 className="text-lg font-medium text-gray-900 mb-1">导入完成</h3>
+                    <p className="text-sm text-gray-500">
+                      共处理 {importResult.total} 条数据
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-4 gap-4">
+                    <div className="p-4 bg-green-50 rounded-xl text-center">
+                      <p className="text-2xl font-bold text-green-600">{importResult.imported}</p>
+                      <p className="text-sm text-green-600">新建</p>
+                    </div>
+                    <div className="p-4 bg-blue-50 rounded-xl text-center">
+                      <p className="text-2xl font-bold text-blue-600">{importResult.updated}</p>
+                      <p className="text-sm text-blue-600">更新</p>
+                    </div>
+                    <div className="p-4 bg-gray-50 rounded-xl text-center">
+                      <p className="text-2xl font-bold text-gray-600">{importResult.skipped}</p>
+                      <p className="text-sm text-gray-600">跳过</p>
+                    </div>
+                    <div className="p-4 bg-red-50 rounded-xl text-center">
+                      <p className="text-2xl font-bold text-red-600">{importResult.invalid}</p>
+                      <p className="text-sm text-red-600">失败</p>
                     </div>
                   </div>
 
                   <div className="border border-gray-200 rounded-xl overflow-hidden">
                     <div className="px-4 py-3 bg-gray-50 border-b border-gray-200">
-                      <p className="text-sm font-medium text-gray-700">数据预览</p>
+                      <p className="text-sm font-medium text-gray-700">导入明细</p>
                     </div>
-                    <div className="max-h-64 overflow-y-auto">
+                    <div className="max-h-80 overflow-y-auto">
                       <table className="w-full text-sm">
                         <thead className="bg-gray-50 sticky top-0">
                           <tr>
-                            <th className="text-left px-4 py-2 text-gray-500 font-medium">行号</th>
+                            <th className="text-left px-4 py-2 text-gray-500 font-medium w-16">行号</th>
                             <th className="text-left px-4 py-2 text-gray-500 font-medium">姓名</th>
-                            <th className="text-left px-4 py-2 text-gray-500 font-medium">公司</th>
                             <th className="text-left px-4 py-2 text-gray-500 font-medium">手机</th>
                             <th className="text-left px-4 py-2 text-gray-500 font-medium">邮箱</th>
-                            <th className="text-left px-4 py-2 text-gray-500 font-medium">状态</th>
+                            <th className="text-left px-4 py-2 text-gray-500 font-medium w-24">结果</th>
+                            <th className="text-left px-4 py-2 text-gray-500 font-medium">说明</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
-                          {importPreview.rows.slice(0, 20).map((row) => (
-                            <tr key={row.rowIndex} className={!row.valid ? 'bg-red-50' : ''}>
-                              <td className="px-4 py-2 text-gray-500">{row.rowIndex}</td>
-                              <td className="px-4 py-2 text-gray-900">{row.name || '-'}</td>
-                              <td className="px-4 py-2 text-gray-600">{row.company || '-'}</td>
-                              <td className="px-4 py-2 text-gray-600">{row.phone || '-'}</td>
-                              <td className="px-4 py-2 text-gray-600">{row.email || '-'}</td>
+                          {importResult.details.map((detail) => (
+                            <tr
+                              key={detail.rowIndex}
+                              className={
+                                !detail.success
+                                  ? 'bg-red-50'
+                                  : detail.action === 'created'
+                                    ? 'bg-green-50/50'
+                                    : detail.action === 'updated'
+                                      ? 'bg-blue-50/50'
+                                      : ''
+                              }
+                            >
+                              <td className="px-4 py-2 text-gray-500">{detail.rowIndex}</td>
+                              <td className="px-4 py-2 text-gray-900">{detail.name || '-'}</td>
+                              <td className="px-4 py-2 text-gray-600">{detail.phone || '-'}</td>
+                              <td className="px-4 py-2 text-gray-600">{detail.email || '-'}</td>
                               <td className="px-4 py-2">
-                                {row.valid ? (
-                                  <span className="flex items-center gap-1 text-green-600">
-                                    <CheckCircle size={14} />
-                                    <span className="text-xs">有效</span>
-                                  </span>
-                                ) : (
-                                  <span className="flex items-center gap-1 text-red-600">
-                                    <AlertCircle size={14} />
-                                    <span className="text-xs">{row.errors.join('、')}</span>
-                                  </span>
-                                )}
+                                <span
+                                  className={`px-2 py-1 rounded-full text-xs font-medium ${
+                                    !detail.success
+                                      ? 'bg-red-100 text-red-700'
+                                      : detail.action === 'created'
+                                        ? 'bg-green-100 text-green-700'
+                                        : detail.action === 'updated'
+                                          ? 'bg-blue-100 text-blue-700'
+                                          : 'bg-gray-100 text-gray-700'
+                                  }`}
+                                >
+                                  {detail.action === 'created'
+                                    ? '新建'
+                                    : detail.action === 'updated'
+                                      ? '更新'
+                                      : detail.action === 'skipped'
+                                        ? '跳过'
+                                        : '失败'}
+                                </span>
                               </td>
+                              <td className="px-4 py-2 text-gray-500 text-xs">{detail.message}</td>
                             </tr>
                           ))}
                         </tbody>
                       </table>
-                      {importPreview.rows.length > 20 && (
-                        <div className="px-4 py-2 text-center text-sm text-gray-500 bg-gray-50">
-                          仅显示前20条，共 {importPreview.rows.length} 条数据
-                        </div>
-                      )}
                     </div>
                   </div>
                 </div>
-              ) : (
-                <div className="text-center py-12 text-gray-500">
-                  <div className="w-12 h-12 border-4 border-primary-200 border-t-primary-600 rounded-full animate-spin mx-auto mb-4"></div>
-                  <p>正在解析文件...</p>
-                </div>
               )}
             </div>
-            {importFile && importPreview && (
+
+            {(importStep === 'preview' || importStep === 'strategy') && (
               <div className="p-6 border-t border-gray-100 flex gap-3">
                 <button
                   onClick={() => {
-                    setImportFile(null);
-                    setImportPreview(null);
+                    if (importStep === 'preview') {
+                      setImportStep('upload');
+                      setImportFile(null);
+                      setImportPreview(null);
+                    } else {
+                      setImportStep('preview');
+                    }
                   }}
                   className="flex-1 py-2.5 px-4 border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 transition-all"
                 >
-                  重新选择
+                  {importStep === 'preview' ? '重新选择' : '上一步'}
+                </button>
+                {importStep === 'preview' && (
+                  <button
+                    onClick={() => setImportStep('strategy')}
+                    className="px-8 py-2.5 bg-primary-700 hover:bg-primary-600 text-white rounded-xl transition-all"
+                  >
+                    下一步
+                  </button>
+                )}
+                {importStep === 'strategy' && (
+                  <button
+                    onClick={handleImport}
+                    className="px-8 py-2.5 bg-primary-700 hover:bg-primary-600 text-white rounded-xl transition-all flex items-center gap-2"
+                  >
+                    <Upload size={16} />
+                    开始导入
+                  </button>
+                )}
+              </div>
+            )}
+
+            {importStep === 'result' && (
+              <div className="p-6 border-t border-gray-100 flex gap-3">
+                <button
+                  onClick={() => {
+                    setImportStep('upload');
+                    setImportFile(null);
+                    setImportPreview(null);
+                    setImportResult(null);
+                  }}
+                  className="flex-1 py-2.5 px-4 border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 transition-all flex items-center justify-center gap-2"
+                >
+                  <RefreshCw size={16} />
+                  继续导入
                 </button>
                 <button
-                  onClick={() => handleImport(false)}
-                  className="px-6 py-2.5 bg-gray-200 hover:bg-gray-300 text-gray-700 rounded-xl transition-all"
+                  onClick={resetImportModal}
+                  className="flex-1 py-2.5 px-4 bg-primary-700 hover:bg-primary-600 text-white rounded-xl transition-all"
                 >
-                  全部导入（含重复）
-                </button>
-                <button
-                  onClick={() => handleImport(true)}
-                  className="px-6 py-2.5 bg-primary-700 hover:bg-primary-600 text-white rounded-xl transition-all"
-                >
-                  跳过重复导入
+                  完成
                 </button>
               </div>
             )}

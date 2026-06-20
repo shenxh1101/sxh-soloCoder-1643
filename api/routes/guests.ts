@@ -2,14 +2,27 @@ import { Router, type Request, type Response } from 'express';
 import QRCode from 'qrcode';
 import * as XLSX from 'xlsx';
 import { db } from '../db/database.js';
-import type { Guest, ImportGuestRow, ImportResult } from '../../shared/types.js';
+import type { Guest, ImportGuestRow, ImportResult, ImportDuplicateStrategy, ImportResultDetail } from '../../shared/types.js';
 
 const router = Router({ mergeParams: true });
 
 router.get('/', (req: Request, res: Response): void => {
   const { eventId } = req.params;
-  const guests = db.getGuestsByEvent(eventId);
+  const { inviteStatus } = req.query;
+  let guests = db.getGuestsByEvent(eventId);
+
+  if (inviteStatus && typeof inviteStatus === 'string') {
+    const statuses = inviteStatus.split(',');
+    guests = guests.filter((g) => statuses.includes(g.inviteStatus));
+  }
+
   res.json(guests);
+});
+
+router.get('/:guestId/invitations', (req: Request, res: Response): void => {
+  const { guestId } = req.params;
+  const invitations = db.getInvitationsByGuest(guestId);
+  res.json(invitations);
 });
 
 router.get('/:guestId', (req: Request, res: Response): void => {
@@ -231,28 +244,85 @@ router.post('/import/validate', (req: Request, res: Response): void => {
     const rows = XLSX.utils.sheet_to_json(firstSheet) as any[];
 
     const existingGuests = db.getGuestsByEvent(eventId);
-    const existingPhones = new Set(existingGuests.map((g) => g.phone).filter(Boolean));
-    const existingEmails = new Set(existingGuests.map((g) => g.email).filter(Boolean));
+    const existingPhoneMap = new Map<string, string>();
+    const existingEmailMap = new Map<string, string>();
 
-    const validatedRows: ImportGuestRow[] = rows.map((row, index) => {
+    for (const g of existingGuests) {
+      if (g.phone) existingPhoneMap.set(g.phone, g.id);
+      if (g.email) existingEmailMap.set(g.email, g.id);
+    }
+
+    const filePhoneMap = new Map<string, number>();
+    const fileEmailMap = new Map<string, number>();
+
+    const parsedRows = rows.map((row, index) => {
       const name = String(row['姓名'] || row['name'] || '').trim();
       const company = String(row['公司'] || row['company'] || '').trim();
       const position = String(row['职位'] || row['position'] || '').trim();
       const phone = String(row['手机'] || row['手机号'] || row['phone'] || '').trim();
       const email = String(row['邮箱'] || row['email'] || '').trim();
+      return { name, company, position, phone, email, rowIndex: index + 2 };
+    });
 
+    for (const row of parsedRows) {
+      if (row.phone) {
+        if (filePhoneMap.has(row.phone)) {
+          // 已经记录过，不重复记录
+        } else {
+          filePhoneMap.set(row.phone, row.rowIndex);
+        }
+      }
+      if (row.email) {
+        if (fileEmailMap.has(row.email)) {
+          // 已经记录过，不重复记录
+        } else {
+          fileEmailMap.set(row.email, row.rowIndex);
+        }
+      }
+    }
+
+    const validatedRows: ImportGuestRow[] = parsedRows.map((row) => {
+      const { name, company, position, phone, email, rowIndex } = row;
       const errors: string[] = [];
+
       if (!name) errors.push('姓名不能为空');
       if (phone && !/^1[3-9]\d{9}$/.test(phone)) errors.push('手机号格式不正确');
       if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) errors.push('邮箱格式不正确');
 
-      const isDuplicatePhone = phone ? existingPhones.has(phone) : false;
-      const isDuplicateEmail = email ? existingEmails.has(email) : false;
+      const isDuplicatePhone = phone ? existingPhoneMap.has(phone) : false;
+      const isDuplicateEmail = email ? existingEmailMap.has(email) : false;
+
+      let isDuplicateInFile = false;
+      let duplicateWithRow: number | undefined;
+
+      if (phone) {
+        const firstRow = filePhoneMap.get(phone);
+        if (firstRow !== undefined && firstRow !== rowIndex) {
+          isDuplicateInFile = true;
+          duplicateWithRow = firstRow;
+          errors.push('手机号在文件内重复');
+        }
+      }
+      if (email && !isDuplicateInFile) {
+        const firstRow = fileEmailMap.get(email);
+        if (firstRow !== undefined && firstRow !== rowIndex) {
+          isDuplicateInFile = true;
+          duplicateWithRow = firstRow;
+          errors.push('邮箱在文件内重复');
+        }
+      }
 
       if (isDuplicatePhone) errors.push('手机号已存在');
       if (isDuplicateEmail) errors.push('邮箱已存在');
 
       const valid = errors.length === 0;
+
+      let existingGuestId: string | undefined;
+      if (phone && existingPhoneMap.has(phone)) {
+        existingGuestId = existingPhoneMap.get(phone);
+      } else if (email && existingEmailMap.has(email)) {
+        existingGuestId = existingEmailMap.get(email);
+      }
 
       return {
         name,
@@ -260,18 +330,21 @@ router.post('/import/validate', (req: Request, res: Response): void => {
         position,
         phone,
         email,
-        rowIndex: index + 2,
+        rowIndex,
         valid,
         errors,
         isDuplicatePhone,
         isDuplicateEmail,
+        isDuplicateInFile,
+        duplicateWithRow,
+        existingGuestId,
       };
     });
 
     const validRows = validatedRows.filter((r) => r.valid);
     const invalidRows = validatedRows.filter((r) => !r.valid);
     const duplicateCount = validatedRows.filter(
-      (r) => r.isDuplicatePhone || r.isDuplicateEmail,
+      (r) => r.isDuplicatePhone || r.isDuplicateEmail || r.isDuplicateInFile,
     ).length;
 
     res.json({
@@ -288,7 +361,7 @@ router.post('/import/validate', (req: Request, res: Response): void => {
 
 router.post('/import', (req: Request, res: Response): void => {
   const { eventId } = req.params;
-  const { file, skipDuplicates = true } = req.body;
+  const { file, strategy = 'skip' as ImportDuplicateStrategy } = req.body;
 
   if (!file || !file.data) {
     res.status(400).json({ error: '请上传Excel文件' });
@@ -301,35 +374,130 @@ router.post('/import', (req: Request, res: Response): void => {
     const rows = XLSX.utils.sheet_to_json(firstSheet) as any[];
 
     const importedGuests: Guest[] = [];
+    const details: ImportResultDetail[] = [];
     const errors: string[] = [];
-    let skipped = 0;
+    let skippedCount = 0;
+    let updatedCount = 0;
+    let importedCount = 0;
+
+    const seenPhones = new Set<string>();
+    const seenEmails = new Set<string>();
 
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
+      const rowIndex = i + 2;
       const name = String(row['姓名'] || row['name'] || '').trim();
       const company = String(row['公司'] || row['company'] || '').trim();
       const position = String(row['职位'] || row['position'] || '').trim();
       const phone = String(row['手机'] || row['手机号'] || row['phone'] || '').trim();
       const email = String(row['邮箱'] || row['email'] || '').trim();
 
+      const detailBase: Omit<ImportResultDetail, 'success' | 'action' | 'message'> = {
+        rowIndex,
+        name,
+        phone,
+        email,
+      };
+
       if (!name) {
-        errors.push(`第${i + 2}行：姓名不能为空`);
+        details.push({ ...detailBase, success: false, action: 'failed', message: '姓名不能为空' });
+        errors.push(`第${rowIndex}行：姓名不能为空`);
         continue;
       }
       if (phone && !/^1[3-9]\d{9}$/.test(phone)) {
-        errors.push(`第${i + 2}行：手机号格式不正确`);
+        details.push({ ...detailBase, success: false, action: 'failed', message: '手机号格式不正确' });
+        errors.push(`第${rowIndex}行：手机号格式不正确`);
         continue;
       }
       if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        errors.push(`第${i + 2}行：邮箱格式不正确`);
+        details.push({ ...detailBase, success: false, action: 'failed', message: '邮箱格式不正确' });
+        errors.push(`第${rowIndex}行：邮箱格式不正确`);
         continue;
       }
 
-      if (skipDuplicates) {
-        const existingByPhone = phone ? db.getGuestByPhone(eventId, phone) : null;
-        const existingByEmail = email ? db.getGuestByEmail(eventId, email) : null;
-        if (existingByPhone || existingByEmail) {
-          skipped++;
+      let isDuplicateInFile = false;
+      if (phone && seenPhones.has(phone)) {
+        isDuplicateInFile = true;
+      } else if (email && seenEmails.has(email)) {
+        isDuplicateInFile = true;
+      }
+
+      if (isDuplicateInFile) {
+        details.push({ ...detailBase, success: false, action: 'failed', message: '数据在文件内重复' });
+        errors.push(`第${rowIndex}行：数据在文件内重复`);
+        continue;
+      }
+
+      if (phone) seenPhones.add(phone);
+      if (email) seenEmails.add(email);
+
+      const existingByPhone = phone ? db.getGuestByPhone(eventId, phone) : null;
+      const existingByEmail = email ? db.getGuestByEmail(eventId, email) : null;
+      const existingGuest = existingByPhone || existingByEmail;
+
+      if (existingGuest) {
+        if (strategy === 'skip') {
+          skippedCount++;
+          details.push({
+            ...detailBase,
+            success: true,
+            action: 'skipped',
+            guestId: existingGuest.id,
+            message: '已跳过重复数据',
+          });
+          continue;
+        } else if (strategy === 'overwrite') {
+          const updated = db.updateGuest(existingGuest.id, {
+            name,
+            company,
+            position,
+            phone,
+            email,
+          });
+          if (updated) {
+            updatedCount++;
+            importedGuests.push(updated);
+            details.push({
+              ...detailBase,
+              success: true,
+              action: 'updated',
+              guestId: updated.id,
+              message: '已覆盖原有信息',
+            });
+          }
+          continue;
+        } else if (strategy === 'merge') {
+          const mergedData: Partial<Guest> = {};
+          if (name && !existingGuest.name) mergedData.name = name;
+          if (company && !existingGuest.company) mergedData.company = company;
+          if (position && !existingGuest.position) mergedData.position = position;
+          if (phone && !existingGuest.phone) mergedData.phone = phone;
+          if (email && !existingGuest.email) mergedData.email = email;
+
+          const hasChanges = Object.keys(mergedData).length > 0;
+          if (hasChanges) {
+            const updated = db.updateGuest(existingGuest.id, mergedData);
+            if (updated) {
+              updatedCount++;
+              importedGuests.push(updated);
+              details.push({
+                ...detailBase,
+                success: true,
+                action: 'updated',
+                guestId: updated.id,
+                message: '已合并补充信息',
+              });
+            }
+          } else {
+            skippedCount++;
+            details.push({
+              ...detailBase,
+              success: true,
+              action: 'skipped',
+              guestId: existingGuest.id,
+              message: '信息完整，无需合并',
+            });
+          }
           continue;
         }
       }
@@ -350,16 +518,30 @@ router.post('/import', (req: Request, res: Response): void => {
       };
 
       const newGuest = db.addGuest(guestData);
+      importedCount++;
       importedGuests.push(newGuest);
+      details.push({
+        ...detailBase,
+        success: true,
+        action: 'created',
+        guestId: newGuest.id,
+        message: '创建成功',
+      });
     }
+
+    const validCount = importedCount + updatedCount + skippedCount;
+    const duplicateCount = skippedCount + updatedCount;
 
     const result: ImportResult = {
       total: rows.length,
-      valid: importedGuests.length + skipped,
-      invalid: errors.length,
-      duplicates: skipped,
-      imported: importedGuests.length,
+      valid: validCount,
+      invalid: rows.length - validCount,
+      duplicates: duplicateCount,
+      imported: importedCount,
+      updated: updatedCount,
+      skipped: skippedCount,
       guests: importedGuests,
+      details,
       errors,
     };
 

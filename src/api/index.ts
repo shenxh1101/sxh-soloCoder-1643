@@ -8,6 +8,8 @@ import type {
   ReportData,
   ImportGuestRow,
   ImportResult,
+  ImportDuplicateStrategy,
+  InvitationRecord,
 } from '../../shared/types';
 
 const API_BASE = '/api';
@@ -59,10 +61,16 @@ export const eventsApi = {
 };
 
 export const guestsApi = {
-  getByEvent: (eventId: string) =>
-    request<Guest[]>(`/events/${eventId}/guests`),
+  getByEvent: (eventId: string, inviteStatus?: string) => {
+    const url = inviteStatus
+      ? `/events/${eventId}/guests?inviteStatus=${inviteStatus}`
+      : `/events/${eventId}/guests`;
+    return request<Guest[]>(url);
+  },
   getById: (eventId: string, guestId: string) =>
     request<Guest>(`/events/${eventId}/guests/${guestId}`),
+  getInvitations: (eventId: string, guestId: string) =>
+    request<InvitationRecord[]>(`/events/${eventId}/guests/${guestId}/invitations`),
   create: (eventId: string, data: Partial<Guest>) =>
     request<Guest>(`/events/${eventId}/guests`, {
       method: 'POST',
@@ -114,10 +122,10 @@ export const guestsApi = {
       method: 'POST',
       body: JSON.stringify({ file: { data: fileBase64 } }),
     }),
-  importGuests: (eventId: string, fileBase64: string, skipDuplicates?: boolean) =>
+  importGuests: (eventId: string, fileBase64: string, strategy?: ImportDuplicateStrategy) =>
     request<ImportResult>(`/events/${eventId}/guests/import`, {
       method: 'POST',
-      body: JSON.stringify({ file: { data: fileBase64 }, skipDuplicates }),
+      body: JSON.stringify({ file: { data: fileBase64 }, strategy }),
     }),
   bulkInvite: (eventId: string, method: 'email' | 'sms', guestIds: string[]) =>
     request<{ success: boolean; successCount: number; failedCount: number; total: number }>(

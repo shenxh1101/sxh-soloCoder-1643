@@ -93,6 +93,8 @@ export interface InvitationRecord {
   errorMessage?: string;
 }
 
+export type ImportDuplicateStrategy = 'skip' | 'overwrite' | 'merge';
+
 export interface ImportGuestRow {
   name: string;
   company: string;
@@ -104,6 +106,20 @@ export interface ImportGuestRow {
   errors: string[];
   isDuplicatePhone: boolean;
   isDuplicateEmail: boolean;
+  isDuplicateInFile: boolean;
+  duplicateWithRow?: number;
+  existingGuestId?: string;
+}
+
+export interface ImportResultDetail {
+  rowIndex: number;
+  name: string;
+  phone: string;
+  email: string;
+  success: boolean;
+  action: 'created' | 'updated' | 'skipped' | 'failed';
+  guestId?: string;
+  message: string;
 }
 
 export interface ImportResult {
@@ -112,7 +128,10 @@ export interface ImportResult {
   invalid: number;
   duplicates: number;
   imported: number;
+  updated: number;
+  skipped: number;
   guests: Guest[];
+  details: ImportResultDetail[];
   errors: string[];
 }
 

@@ -17,15 +17,21 @@ import {
   X,
   AlertCircle,
   MapPin,
+  History,
+  Check,
+  XCircle,
 } from 'lucide-react';
-import { guestsApi } from '@/api';
-import type { Guest } from '@shared/types';
+import { guestsApi, seatsApi } from '@/api';
+import type { Guest, InvitationRecord, SeatZone } from '@shared/types';
+import { getZoneName } from '@/lib/utils';
 
 export default function GuestDetail() {
   const { eventId, guestId } = useParams<{ eventId: string; guestId: string }>();
   const navigate = useNavigate();
   const [guest, setGuest] = useState<Guest | null>(null);
+  const [zones, setZones] = useState<SeatZone[]>([]);
   const [qrDataUrl, setQrDataUrl] = useState('');
+  const [invitations, setInvitations] = useState<InvitationRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [inviteMethod, setInviteMethod] = useState<'email' | 'sms'>('email');
@@ -45,12 +51,16 @@ export default function GuestDetail() {
     if (!eventId || !guestId) return;
     try {
       setLoading(true);
-      const [guestData, qrData] = await Promise.all([
+      const [guestData, qrData, invitationData, zonesData] = await Promise.all([
         guestsApi.getById(eventId, guestId),
         guestsApi.getQrCode(eventId, guestId),
+        guestsApi.getInvitations(eventId, guestId),
+        seatsApi.getZones(eventId),
       ]);
       setGuest(guestData);
       setQrDataUrl(qrData.qrDataUrl);
+      setInvitations(invitationData.sort((a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime()));
+      setZones(zonesData);
     } catch (err) {
       console.error('加载数据失败:', err);
     } finally {
@@ -126,13 +136,6 @@ export default function GuestDetail() {
       default:
         return '未发送';
     }
-  };
-
-  const getZoneName = (zoneId?: string) => {
-    if (!zoneId) return '';
-    if (zoneId === 'zone-vip-001') return 'VIP区';
-    if (zoneId === 'zone-media-001') return '媒体区';
-    return '普通区';
   };
 
   if (loading) {
@@ -253,7 +256,7 @@ export default function GuestDetail() {
                     <p className="text-sm text-gray-500 mb-1">座位信息</p>
                     <p className="text-gray-900 font-medium">
                       {guest.seatZoneId
-                        ? `${getZoneName(guest.seatZoneId)}${
+                        ? `${getZoneName(guest.seatZoneId, zones)}${
                             guest.seatNumber ? ` - ${guest.seatNumber}号` : ''
                           }`
                         : '尚未分配座位'}
@@ -297,6 +300,76 @@ export default function GuestDetail() {
                   </>
                 )}
               </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+            <div className="p-6 border-b border-gray-100 flex items-center justify-between">
+              <h2 className="text-lg font-serif font-bold text-gray-900">邀请发送记录</h2>
+              <span className="text-sm text-gray-500">共 {invitations.length} 条记录</span>
+            </div>
+            <div className="divide-y divide-gray-100 max-h-80 overflow-y-auto">
+              {invitations.length === 0 ? (
+                <div className="p-8 text-center">
+                  <History className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+                  <p className="text-gray-500 text-sm">暂无发送记录</p>
+                </div>
+              ) : (
+                invitations.map((invitation) => (
+                  <div key={invitation.id} className="p-4 hover:bg-gray-50 transition-colors">
+                    <div className="flex items-start gap-3">
+                      <div
+                        className={`w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 ${
+                          invitation.status === 'sent'
+                            ? 'bg-green-100'
+                            : 'bg-red-100'
+                        }`}
+                      >
+                        {invitation.method === 'email' ? (
+                          <MailIcon
+                            size={18}
+                            className={invitation.status === 'sent' ? 'text-green-600' : 'text-red-600'}
+                          />
+                        ) : (
+                          <MessageSquare
+                            size={18}
+                            className={invitation.status === 'sent' ? 'text-green-600' : 'text-red-600'}
+                          />
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium text-gray-900">
+                            {invitation.method === 'email' ? '邮件邀请' : '短信邀请'}
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                              invitation.status === 'sent'
+                                ? 'bg-green-100 text-green-700'
+                                : 'bg-red-100 text-red-700'
+                            }`}
+                          >
+                            {invitation.status === 'sent' ? '发送成功' : '发送失败'}
+                          </span>
+                        </div>
+                        <p className="text-xs text-gray-500 mt-1">
+                          {new Date(invitation.sentAt).toLocaleString('zh-CN')}
+                        </p>
+                        {invitation.errorMessage && (
+                          <p className="text-xs text-red-500 mt-1">
+                            {invitation.errorMessage}
+                          </p>
+                        )}
+                      </div>
+                      {invitation.status === 'sent' ? (
+                        <Check size={16} className="text-green-500 flex-shrink-0" />
+                      ) : (
+                        <XCircle size={16} className="text-red-500 flex-shrink-0" />
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         </div>

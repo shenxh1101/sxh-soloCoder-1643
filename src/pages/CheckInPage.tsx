@@ -1,21 +1,21 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import {
-  QrCode,
   User,
   CheckCircle,
   XCircle,
   Search,
   Clock,
-  ScanLine,
   Camera,
   CameraOff,
   AlertTriangle,
   MapPin,
+  CheckCheck,
 } from 'lucide-react';
-import { checkInsApi, guestsApi, eventsApi } from '@/api';
-import type { Guest, Event } from '@shared/types';
+import { checkInsApi, guestsApi, eventsApi, seatsApi } from '@/api';
+import type { Guest, Event, SeatZone } from '@shared/types';
 import { Html5Qrcode } from 'html5-qrcode';
+import { getZoneName } from '@/lib/utils';
 
 type ScanResult = {
   success: boolean;
@@ -27,6 +27,7 @@ type ScanResult = {
 export default function CheckInPage() {
   const { eventId } = useParams<{ eventId: string }>();
   const [event, setEvent] = useState<Event | null>(null);
+  const [zones, setZones] = useState<SeatZone[]>([]);
   const [qrInput, setQrInput] = useState('');
   const [searchName, setSearchName] = useState('');
   const [searchResults, setSearchResults] = useState<Guest[]>([]);
@@ -35,10 +36,12 @@ export default function CheckInPage() {
   const [isScanning, setIsScanning] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [isPaused, setIsPaused] = useState(false);
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const scannerContainerId = 'qr-reader';
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isProcessingRef = useRef(false);
+  const resumeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (eventId) {
@@ -52,8 +55,12 @@ export default function CheckInPage() {
   const loadEvent = async () => {
     if (!eventId) return;
     try {
-      const data = await eventsApi.getById(eventId);
-      setEvent(data);
+      const [eventData, zonesData] = await Promise.all([
+        eventsApi.getById(eventId),
+        seatsApi.getZones(eventId),
+      ]);
+      setEvent(eventData);
+      setZones(zonesData);
     } catch (err) {
       console.error('加载活动失败:', err);
     }
@@ -62,12 +69,12 @@ export default function CheckInPage() {
   const handleQrSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!qrInput.trim() || !eventId) return;
-    await processQrCode(qrInput.trim());
+    await processQrCode(qrInput.trim(), false);
     setQrInput('');
   };
 
-  const processQrCode = async (qrCode: string): Promise<void> => {
-    if (isProcessingRef.current || !eventId) return;
+  const processQrCode = async (qrCode: string, fromCamera: boolean): Promise<void> => {
+    if (isProcessingRef.current || !eventId || isPaused) return;
     isProcessingRef.current = true;
 
     try {
@@ -75,6 +82,7 @@ export default function CheckInPage() {
         qrCode,
         method: 'qrcode',
       });
+
       setResult({
         success: true,
         guest: response.guest,
@@ -82,6 +90,10 @@ export default function CheckInPage() {
       });
       setRecentCheckIns((prev) => [response.guest, ...prev].slice(0, 10));
       playBeep();
+
+      if (fromCamera) {
+        pauseAndResume();
+      }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : '签到失败';
       let errorCode = 'unknown';
@@ -104,12 +116,37 @@ export default function CheckInPage() {
         errorCode,
       });
       playErrorBeep();
+
+      if (fromCamera) {
+        pauseAndResume();
+      }
     } finally {
-      setTimeout(() => {
-        setResult(null);
-        isProcessingRef.current = false;
-      }, 3000);
+      if (!fromCamera) {
+        setTimeout(() => {
+          setResult(null);
+          isProcessingRef.current = false;
+        }, 3000);
+      }
     }
+  };
+
+  const pauseAndResume = () => {
+    setIsPaused(true);
+    if (scannerRef.current && scannerRef.current.isScanning) {
+      scannerRef.current.pause();
+    }
+
+    if (resumeTimeoutRef.current) {
+      clearTimeout(resumeTimeoutRef.current);
+    }
+    resumeTimeoutRef.current = setTimeout(() => {
+      setResult(null);
+      setIsPaused(false);
+      isProcessingRef.current = false;
+      if (scannerRef.current && scannerRef.current.isScanning) {
+        scannerRef.current.resume();
+      }
+    }, 2000);
   };
 
   const playBeep = () => {
@@ -119,7 +156,7 @@ export default function CheckInPage() {
       const gainNode = audioContext.createGain();
       oscillator.connect(gainNode);
       gainNode.connect(audioContext.destination);
-      oscillator.frequency.value = 800;
+      oscillator.frequency.value = 880;
       oscillator.type = 'sine';
       gainNode.gain.value = 0.3;
       oscillator.start();
@@ -164,11 +201,11 @@ export default function CheckInPage() {
       await scannerRef.current.start(
         { facingMode: 'environment' },
         {
-          fps: 10,
+          fps: 15,
           qrbox: { width: 250, height: 250 },
         },
         (decodedText) => {
-          processQrCode(decodedText);
+          processQrCode(decodedText, true);
         },
         () => {
           // 扫描错误回调，忽略（持续扫描中）
@@ -194,6 +231,7 @@ export default function CheckInPage() {
       }
     }
     setIsScanning(false);
+    setIsPaused(false);
   };
 
   const toggleScanner = () => {
@@ -249,9 +287,25 @@ export default function CheckInPage() {
       setShowSearch(false);
       playBeep();
     } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : '签到失败';
+      let errorCode = 'unknown';
+      let guestInfo: Guest | undefined;
+
+      const errorData = (err as any)?.data;
+      if (errorData) {
+        if (errorData.errorCode) {
+          errorCode = errorData.errorCode;
+        }
+        if (errorData.guest) {
+          guestInfo = errorData.guest;
+        }
+      }
+
       setResult({
         success: false,
-        message: err instanceof Error ? err.message : '签到失败',
+        guest: guestInfo,
+        message: errorMessage,
+        errorCode,
       });
       playErrorBeep();
     }
@@ -268,7 +322,7 @@ export default function CheckInPage() {
       case 'invalid_qrcode':
         return <XCircle className="w-10 h-10 text-red-500 flex-shrink-0" />;
       case 'already_checked_in':
-        return <AlertTriangle className="w-10 h-10 text-yellow-500 flex-shrink-0" />;
+        return <CheckCheck className="w-10 h-10 text-yellow-500 flex-shrink-0" />;
       case 'wrong_event':
         return <AlertTriangle className="w-10 h-10 text-orange-500 flex-shrink-0" />;
       default:
@@ -298,7 +352,7 @@ export default function CheckInPage() {
       case 'invalid_qrcode':
         return '二维码无效';
       case 'already_checked_in':
-        return '重复签到';
+        return '已签到';
       case 'wrong_event':
         return '活动不匹配';
       default:
@@ -334,27 +388,47 @@ export default function CheckInPage() {
                     <div id={scannerContainerId} className="w-full h-full" />
                     <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
                       <div className="relative w-48 h-48">
-                        <div className="absolute inset-0 border-2 border-primary-400 rounded-lg animate-pulse"></div>
+                        <div
+                          className={`absolute inset-0 border-2 rounded-lg transition-all ${
+                            isPaused ? 'border-yellow-400' : 'border-primary-400'
+                          } ${isPaused ? 'animate-pulse' : ''}`}
+                        ></div>
                         <div className="absolute top-0 left-0 w-6 h-6 border-t-4 border-l-4 border-primary-500 rounded-tl-lg"></div>
                         <div className="absolute top-0 right-0 w-6 h-6 border-t-4 border-r-4 border-primary-500 rounded-tr-lg"></div>
                         <div className="absolute bottom-0 left-0 w-6 h-6 border-b-4 border-l-4 border-primary-500 rounded-bl-lg"></div>
                         <div className="absolute bottom-0 right-0 w-6 h-6 border-b-4 border-r-4 border-primary-500 rounded-br-lg"></div>
                       </div>
                     </div>
-                  </div>
-                ) : (
-                  <button
-                    onClick={toggleScanner}
-                    className="w-full h-full text-center group flex flex-col items-center justify-center"
-                  >
-                    <div className="w-24 h-24 mx-auto mb-4 rounded-2xl bg-white shadow-card flex items-center justify-center group-hover:shadow-card-hover transition-all">
-                      <Camera className="w-12 h-12 text-primary-600" />
+                    {isPaused && (
+                      <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
+                        <div className="text-center text-white">
+                          <div className="w-16 h-16 mx-auto mb-2 bg-white/20 rounded-full flex items-center justify-center">
+                          {result?.success ? (
+                            <CheckCircle className="w-10 h-10 text-green-400" />
+                          ) : (
+                            <XCircle className="w-10 h-10 text-red-400" />
+                          )}
+                        </div>
+                        <p className="text-sm font-medium">
+                          {result?.success ? '签到成功' : '签到失败'}
+                        </p>
+                      </div>
                     </div>
-                    <p className="text-gray-600 font-medium">点击开启摄像头扫码</p>
-                    <p className="text-sm text-gray-400 mt-1">或手动输入二维码内容</p>
-                  </button>
-                )}
-              </div>
+                  )}
+                </div>
+              ) : (
+                <button
+                  onClick={toggleScanner}
+                  className="w-full h-full text-center group flex flex-col items-center justify-center"
+                >
+                  <div className="w-24 h-24 mx-auto mb-4 rounded-2xl bg-white shadow-card flex items-center justify-center group-hover:shadow-card-hover transition-all">
+                    <Camera className="w-12 h-12 text-primary-600" />
+                  </div>
+                  <p className="text-gray-600 font-medium">点击开启摄像头扫码</p>
+                  <p className="text-sm text-gray-400 mt-1">或手动输入二维码内容</p>
+                </button>
+              )}
+            </div>
 
               {cameraError && (
                 <div className="mt-4 max-w-sm mx-auto p-3 bg-yellow-50 border border-yellow-200 rounded-xl flex items-start gap-2">
@@ -453,7 +527,7 @@ export default function CheckInPage() {
                 </div>
               )}
 
-              {result && (
+              {result && !isPaused && (
                 <div
                   className={`mt-6 max-w-sm mx-auto p-4 rounded-xl border flex items-start gap-3 animate-fade-in ${getResultStyle()}`}
                 >
@@ -504,12 +578,12 @@ export default function CheckInPage() {
                           <p
                             className={`text-xs ${
                               result.success
-                                ? 'text-green-600'
-                                : result.errorCode === 'already_checked_in'
-                                  ? 'text-yellow-600'
-                                  : result.errorCode === 'wrong_event'
-                                    ? 'text-orange-600'
-                                    : 'text-red-600'
+                              ? 'text-green-600'
+                              : result.errorCode === 'already_checked_in'
+                                ? 'text-yellow-600'
+                                : result.errorCode === 'wrong_event'
+                                  ? 'text-orange-600'
+                                  : 'text-red-600'
                             }`}
                           >
                             {result.guest.company}
@@ -557,11 +631,7 @@ export default function CheckInPage() {
                         {guest.seatZoneId && (
                           <p className="text-xs text-primary-600 mt-0.5 flex items-center gap-1">
                             <MapPin size={12} />
-                            {guest.seatZoneId === 'zone-vip-001'
-                              ? 'VIP区'
-                              : guest.seatZoneId === 'zone-media-001'
-                                ? '媒体区'
-                                : '普通区'}
+                            {getZoneName(guest.seatZoneId, zones)}
                             {guest.seatNumber ? ` - ${guest.seatNumber}号` : ''}
                           </p>
                         )}
